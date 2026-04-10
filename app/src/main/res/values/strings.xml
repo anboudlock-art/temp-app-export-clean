@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">蓝牙锁密码修改（简化版）</string>
+    <string name="app_description">简化版使用说明：\n1. 点击扫描设备查找蓝牙锁\n2. 选择设备并点击连接设备\n3. 输入新密码（6位数字）\n4. 点击修改密码，等待设备响应\n\n注意：\n- 假设初始密码为 000000\n- 无需验证密码步骤\n- 设备距离需在 2 米内</string>
+</resources>
