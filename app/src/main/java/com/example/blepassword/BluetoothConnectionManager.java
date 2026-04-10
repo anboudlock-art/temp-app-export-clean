@@ -1,6 +1,7 @@
 package com.example.blepassword;
 
 import android.annotation.SuppressLint;
+import android.app.Activity;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -10,6 +11,7 @@ import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -53,6 +55,10 @@ public class BluetoothConnectionManager {
     private ScanCallback scanCallback;
     private ConnectionCallback connectionCallback;
     private DataCallback currentDataCallback;
+
+    // 保存真实的底层 BLE 扫描 callback，用于 stopScan 时传回同一个实例
+    private android.bluetooth.le.ScanCallback leScanCallback;
+    private BluetoothAdapter.LeScanCallback legacyLeScanCallback;
 
     private final Handler scanTimeoutHandler = new Handler(Looper.getMainLooper());
     private final Handler connectionTimeoutHandler = new Handler(Looper.getMainLooper());
@@ -102,6 +108,28 @@ public class BluetoothConnectionManager {
     }
 
     /**
+     * 蓝牙是否已开启
+     */
+    public boolean isBluetoothEnabled() {
+        return bluetoothAdapter != null && bluetoothAdapter.isEnabled();
+    }
+
+    /**
+     * 发起开启蓝牙的请求（弹出系统对话框）
+     */
+    @SuppressLint("MissingPermission")
+    public void enableBluetooth(Activity activity) {
+        if (bluetoothAdapter == null) {
+            Log.e(TAG, "蓝牙适配器为空，无法开启蓝牙");
+            return;
+        }
+        if (!bluetoothAdapter.isEnabled()) {
+            Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+            activity.startActivity(enableBtIntent);
+        }
+    }
+
+    /**
      * 开始扫描蓝牙设备
      */
     @SuppressLint("MissingPermission")
@@ -147,58 +175,58 @@ public class BluetoothConnectionManager {
 
     /**
      * Android 5.0+ 扫描
+     *
+     * 注意：不使用 ScanFilter.setDeviceName("LOCK_") —— 该方法是精确匹配，
+     * 无法用作前缀过滤。改为在 onScanResult 回调里用 startsWith("LOCK_") 过滤。
      */
     @SuppressLint("MissingPermission")
     @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
     private void startScanLollipop() {
         android.bluetooth.le.BluetoothLeScanner scanner = bluetoothAdapter.getBluetoothLeScanner();
-        if (scanner != null) {
-            android.bluetooth.le.ScanSettings settings = new android.bluetooth.le.ScanSettings.Builder()
-                    .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
-                    .build();
-            
-            android.bluetooth.le.ScanFilter filter = new android.bluetooth.le.ScanFilter.Builder()
-                    .setDeviceName("LOCK_")
-                    .build();
-            
-            List<android.bluetooth.le.ScanFilter> filters = new ArrayList<>();
-            filters.add(filter);
-
-            scanner.startScan(filters, settings, new android.bluetooth.le.ScanCallback() {
-                @Override
-                public void onScanResult(int callbackType, android.bluetooth.le.ScanResult result) {
-                    BluetoothDevice device = result.getDevice();
-                    String name = device.getName();
-                    
-                    Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
-                    
-                    // 只处理名称以LOCK_开头的设备
-                    if (name != null && name.startsWith("LOCK_")) {
-                        if (scanCallback != null) {
-                            scanCallback.onDeviceFound(device, result.getRssi());
-                        }
-                    }
-                }
-
-                @Override
-                public void onBatchScanResults(List<android.bluetooth.le.ScanResult> results) {
-                    Log.d(TAG, "批量扫描结果: " + results.size() + "个设备");
-                }
-
-                @Override
-                public void onScanFailed(int errorCode) {
-                    Log.e(TAG, "扫描失败: " + errorCode);
-                    if (scanCallback != null) {
-                        scanCallback.onScanComplete();
-                    }
-                }
-            });
-        } else {
+        if (scanner == null) {
             Log.e(TAG, "扫描器为空");
             if (scanCallback != null) {
                 scanCallback.onScanComplete();
             }
+            return;
         }
+
+        android.bluetooth.le.ScanSettings settings = new android.bluetooth.le.ScanSettings.Builder()
+                .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build();
+
+        leScanCallback = new android.bluetooth.le.ScanCallback() {
+            @Override
+            public void onScanResult(int callbackType, android.bluetooth.le.ScanResult result) {
+                BluetoothDevice device = result.getDevice();
+                String name = device.getName();
+
+                Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
+
+                // 只处理名称以 LOCK_ 开头的设备
+                if (name != null && name.startsWith("LOCK_")) {
+                    if (scanCallback != null) {
+                        scanCallback.onDeviceFound(device, result.getRssi());
+                    }
+                }
+            }
+
+            @Override
+            public void onBatchScanResults(List<android.bluetooth.le.ScanResult> results) {
+                Log.d(TAG, "批量扫描结果: " + results.size() + "个设备");
+            }
+
+            @Override
+            public void onScanFailed(int errorCode) {
+                Log.e(TAG, "扫描失败: " + errorCode);
+                if (scanCallback != null) {
+                    scanCallback.onScanComplete();
+                }
+            }
+        };
+
+        // 不传 filters（null）以便在回调中自行做前缀过滤
+        scanner.startScan(null, settings, leScanCallback);
     }
 
     /**
@@ -206,21 +234,22 @@ public class BluetoothConnectionManager {
      */
     @SuppressLint("MissingPermission")
     private void startScanLegacy() {
-        bluetoothAdapter.startLeScan(new BluetoothAdapter.LeScanCallback() {
+        legacyLeScanCallback = new BluetoothAdapter.LeScanCallback() {
             @Override
             public void onLeScan(BluetoothDevice device, int rssi, byte[] scanRecord) {
                 String name = device.getName();
-                
+
                 Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
-                
-                // 只处理名称以LOCK_开头的设备
+
+                // 只处理名称以 LOCK_ 开头的设备
                 if (name != null && name.startsWith("LOCK_")) {
                     if (scanCallback != null) {
                         scanCallback.onDeviceFound(device, rssi);
                     }
                 }
             }
-        });
+        };
+        bluetoothAdapter.startLeScan(legacyLeScanCallback);
     }
 
     /**
@@ -237,15 +266,20 @@ public class BluetoothConnectionManager {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && bluetoothAdapter != null) {
             android.bluetooth.le.BluetoothLeScanner scanner = bluetoothAdapter.getBluetoothLeScanner();
-            if (scanner != null) {
-                scanner.stopScan(new android.bluetooth.le.ScanCallback() {});
+            if (scanner != null && leScanCallback != null) {
+                // 必须传入 startScan 时使用的同一个 ScanCallback 实例
+                scanner.stopScan(leScanCallback);
             }
+            leScanCallback = null;
         } else if (bluetoothAdapter != null) {
-            bluetoothAdapter.stopLeScan(null);
+            if (legacyLeScanCallback != null) {
+                bluetoothAdapter.stopLeScan(legacyLeScanCallback);
+            }
+            legacyLeScanCallback = null;
         }
 
         Log.d(TAG, "扫描已停止");
-        
+
         ScanCallback callback = scanCallback;
         scanCallback = null;
         if (callback != null) {
@@ -258,8 +292,6 @@ public class BluetoothConnectionManager {
      */
     @SuppressLint("MissingPermission")
     public void connect(BluetoothDevice device, final ConnectionCallbackWithInfo callback) {
-        Log.d(TAG, "连接设备: " + device.getName() + " (" + device.getAddress() + ")");
-
         if (device == null) {
             Log.e(TAG, "设备为空");
             if (callback != null) {
@@ -267,6 +299,8 @@ public class BluetoothConnectionManager {
             }
             return;
         }
+
+        Log.d(TAG, "连接设备: " + device.getName() + " (" + device.getAddress() + ")");
 
         // 断开现有连接
         if (bluetoothGatt != null) {

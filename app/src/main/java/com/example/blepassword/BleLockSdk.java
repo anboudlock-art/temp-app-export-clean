@@ -112,7 +112,16 @@ public class BleLockSdk {
 
     /**
      * 生成密码验证请求（0x20命令）
-     * 命令格式：55 01 20 [密码6字节] 00 00 CS（10字节）
+     * 命令格式：55 01 20 [密码6字节 ASCII] CS（固定10字节）
+     *
+     * 字节布局：
+     *   [0] 0x55 帧头
+     *   [1] 0x01 数据类型
+     *   [2] 0x20 命令码
+     *   [3..8] 6 字节 ASCII 密码
+     *   [9] 校验和
+     *
+     * 注意：6 字节密码完整占用 [3..8]，中间没有填充字节。
      */
     public static byte[] authPasswdRequest(String password) {
         if (password == null || password.length() != 6) {
@@ -130,15 +139,11 @@ public class BleLockSdk {
         // 命令码
         request[2] = CMD_AUTH_PASSWD;       // 0x20
 
-        // 密码编码（ASCII编码）
+        // 密码编码（ASCII 编码，6 字节放在 [3..8]）
         byte[] encodedPassword = encodePassword(password);
         System.arraycopy(encodedPassword, 0, request, 3, 6);
 
-        // 填充字节
-        request[7] = 0x00;  // 响应类型
-        request[8] = 0x00;  // 保留
-
-        // 校验和（累加+异或双重校验）
+        // 校验和（累加+异或双重校验，基于前 9 字节）
         request[9] = calculateChecksum(request, 9);
 
         log("生成验证密码请求: " + HexStringUtils.bytesToHexString(request));
@@ -146,8 +151,6 @@ public class BleLockSdk {
         log("  类型: 0x" + String.format("%02X", request[1]));
         log("  命令: 0x" + String.format("%02X", request[2]));
         log("  密码(ASCII): " + HexStringUtils.bytesToHexString(request, 3, 6));
-        log("  响应类型: 0x" + String.format("%02X", request[7]));
-        log("  保留: 0x" + String.format("%02X", request[8]));
         log("  校验和: 0x" + String.format("%02X", request[9]));
 
         return request;
@@ -167,7 +170,16 @@ public class BleLockSdk {
 
     /**
      * 生成密码设置请求（0x21命令）
-     * 命令格式：55 01 21 [用户ID] [长度] [密码6字节] CS（10字节）
+     * 命令格式：55 01 21 [密码6字节 ASCII] CS（固定10字节）
+     *
+     * 字节布局：
+     *   [0] 0x55 帧头
+     *   [1] 0x01 数据类型
+     *   [2] 0x21 命令码
+     *   [3..8] 6 字节 ASCII 新密码
+     *   [9] 校验和
+     *
+     * 与 0x20 验证命令结构完全一致，只是命令码不同。
      */
     public static byte[] setAuthPasswdRequest(String password) {
         if (password == null || password.length() != 6) {
@@ -185,43 +197,21 @@ public class BleLockSdk {
         // 命令码
         request[2] = CMD_SET_AUTH_PASSWD;   // 0x21
 
-        // 用户ID（固定使用0x00）
-        request[3] = 0x00;
-
-        // 密码长度（固定6字节）
-        request[4] = 0x06;
-
-        // 密码编码（ASCII编码）
+        // 密码编码（ASCII 编码，6 字节完整放在 [3..8]）
         byte[] encodedPassword = encodePassword(password);
-        System.arraycopy(encodedPassword, 0, request, 5, 6);
+        System.arraycopy(encodedPassword, 0, request, 3, 6);
 
-        // 注意：实际只使用了5-10字节（5字节+校验和），第3-4字节是用户ID和长度
-        // 重新构建正确的请求格式
-        byte[] correctRequest = new byte[10];
-        correctRequest[0] = REQUEST_HEAD;
-        correctRequest[1] = DATA_TYPE;
-        correctRequest[2] = CMD_SET_AUTH_PASSWD;
-        correctRequest[3] = 0x00;  // 用户ID
-        correctRequest[4] = 0x06;  // 密码长度
-        System.arraycopy(encodedPassword, 0, correctRequest, 5, 4); // 只能放4字节密码？
-        
-        // 实际上，固件可能使用简化的格式
-        // 让我们使用更简单的格式：55 01 21 [密码6字节] [填充2字节] CS
-        byte[] simpleRequest = new byte[10];
-        simpleRequest[0] = REQUEST_HEAD;
-        simpleRequest[1] = DATA_TYPE;
-        simpleRequest[2] = CMD_SET_AUTH_PASSWD;
-        System.arraycopy(encodedPassword, 0, simpleRequest, 3, 6); // 密码放在3-8字节
-        simpleRequest[9] = calculateChecksum(simpleRequest, 9); // 9字节校验和
+        // 校验和（累加+异或双重校验，基于前 9 字节）
+        request[9] = calculateChecksum(request, 9);
 
-        log("生成修改密码请求: " + HexStringUtils.bytesToHexString(simpleRequest));
-        log("  帧头: 0x" + String.format("%02X", simpleRequest[0]));
-        log("  类型: 0x" + String.format("%02X", simpleRequest[1]));
-        log("  命令: 0x" + String.format("%02X", simpleRequest[2]));
-        log("  新密码(ASCII): " + HexStringUtils.bytesToHexString(simpleRequest, 3, 6));
-        log("  校验和: 0x" + String.format("%02X", simpleRequest[9]));
+        log("生成修改密码请求: " + HexStringUtils.bytesToHexString(request));
+        log("  帧头: 0x" + String.format("%02X", request[0]));
+        log("  类型: 0x" + String.format("%02X", request[1]));
+        log("  命令: 0x" + String.format("%02X", request[2]));
+        log("  新密码(ASCII): " + HexStringUtils.bytesToHexString(request, 3, 6));
+        log("  校验和: 0x" + String.format("%02X", request[9]));
 
-        return simpleRequest;
+        return request;
     }
 
     /**
@@ -295,6 +285,13 @@ public class BleLockSdk {
      */
     public static Response parseResponse(byte[] responseData) {
         log("================== 解析响应 ==================");
+
+        // 先做 null 检查，避免后续访问崩溃
+        if (responseData == null) {
+            log("错误: 响应数据为空 (null)");
+            return new Response(false, "响应数据为空", null, (byte) 0, (byte) 0);
+        }
+
         log("响应数据: " + HexStringUtils.bytesToHexString(responseData));
         log("数据长度: " + responseData.length + " 字节");
 

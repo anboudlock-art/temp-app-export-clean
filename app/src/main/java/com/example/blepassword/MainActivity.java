@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothDevice;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -207,20 +208,40 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private boolean checkPermissions() {
-        // 检查蓝牙权限
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            appendLog("⚠️  需要位置权限才能扫描蓝牙设备");
-            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQUEST_LOCATION_PERMISSION);
-            return false;
+        // Android 12 (API 31) 及以上需要动态请求 BLUETOOTH_SCAN / BLUETOOTH_CONNECT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            List<String> missing = new ArrayList<>();
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
+                    != PackageManager.PERMISSION_GRANTED) {
+                missing.add(Manifest.permission.BLUETOOTH_SCAN);
+            }
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                    != PackageManager.PERMISSION_GRANTED) {
+                missing.add(Manifest.permission.BLUETOOTH_CONNECT);
+            }
+            if (!missing.isEmpty()) {
+                appendLog("⚠️  需要蓝牙运行时权限 (Android 12+)");
+                requestPermissions(missing.toArray(new String[0]), REQUEST_BLUETOOTH_PERMISSIONS);
+                return false;
+            }
+        } else {
+            // Android 11 及以下：BLE 扫描需要位置权限
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                    != PackageManager.PERMISSION_GRANTED) {
+                appendLog("⚠️  需要位置权限才能扫描蓝牙设备");
+                requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
+                        REQUEST_LOCATION_PERMISSION);
+                return false;
+            }
         }
-        
+
         // 检查蓝牙是否开启
         if (!bluetoothManager.isBluetoothEnabled()) {
             appendLog("⚠️  蓝牙未开启");
             bluetoothManager.enableBluetooth(this);
             return false;
         }
-        
+
         return true;
     }
 
@@ -686,20 +707,27 @@ public class MainActivity extends AppCompatActivity {
         editNewPassword.setEnabled(isConnected);
     }
 
-    private void appendLog(String message) {
+    private void appendLog(final String message) {
+        // 确保所有 UI 操作和 logBuffer 写入都在主线程，避免从 BLE 回调线程修改
+        // 导致 CalledFromWrongThreadException 或并发问题
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(() -> appendLog(message));
+            return;
+        }
+
         String timestamp = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
                 .format(new java.util.Date());
         String logMessage = "[" + timestamp + "] " + message;
-        
+
         logBuffer.append(logMessage).append("\n");
-        
-        // 限制日志缓存大小（保留最近1000行）
+
+        // 限制日志缓存大小（保留最近 1000 行）
         if (logBuffer.length() > 50000) {
-            // 移除前5000个字符
+            // 移除前 5000 个字符
             logBuffer.delete(0, 5000);
         }
-        
-        // 更新界面显示（只显示最近100行）
+
+        // 更新界面显示（只显示最近 100 行）
         String[] lines = logBuffer.toString().split("\n");
         StringBuilder recentLogs = new StringBuilder();
         int start = Math.max(0, lines.length - 100);
@@ -707,7 +735,7 @@ public class MainActivity extends AppCompatActivity {
             recentLogs.append(lines[i]).append("\n");
         }
         textLog.setText(recentLogs.toString());
-        
+
         // 自动滚动到底部
         scrollView.post(() -> scrollView.fullScroll(ScrollView.FOCUS_DOWN));
     }
@@ -715,13 +743,30 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        boolean allGranted = grantResults.length > 0;
+        for (int result : grantResults) {
+            if (result != PackageManager.PERMISSION_GRANTED) {
+                allGranted = false;
+                break;
+            }
+        }
+
         if (requestCode == REQUEST_LOCATION_PERMISSION) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            if (allGranted) {
                 appendLog("✓ 位置权限已授予");
                 startScan();
             } else {
                 appendLog("❌ 位置权限被拒绝");
                 Toast.makeText(this, "需要位置权限才能扫描蓝牙设备", Toast.LENGTH_LONG).show();
+            }
+        } else if (requestCode == REQUEST_BLUETOOTH_PERMISSIONS) {
+            if (allGranted) {
+                appendLog("✓ 蓝牙权限已授予");
+                startScan();
+            } else {
+                appendLog("❌ 蓝牙权限被拒绝");
+                Toast.makeText(this, "需要蓝牙扫描和连接权限", Toast.LENGTH_LONG).show();
             }
         }
     }
