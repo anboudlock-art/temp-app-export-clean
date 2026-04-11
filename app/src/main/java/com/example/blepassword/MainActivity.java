@@ -281,11 +281,19 @@ public class MainActivity extends AppCompatActivity {
                 appendLog("✓ 扫描完成，找到 " + devicesList.size() + " 个设备");
                 textStatus.setText("扫描完成");
                 btnScan.setEnabled(true);
-                
+
                 if (devicesList.isEmpty()) {
                     appendLog("⚠️  未找到 LOCK_ 开头的设备");
                     Toast.makeText(MainActivity.this, "未找到 LOCK_ 开头的设备", Toast.LENGTH_SHORT).show();
                 }
+            }
+
+            @Override
+            public void onScanError(int errorCode, String message) {
+                appendLog("❌ 扫描失败 [errorCode=" + errorCode + "]");
+                appendLog("   原因: " + message);
+                appendLog("💡 请截图此日志发给开发者定位问题");
+                textStatus.setText("扫描失败: " + errorCode);
             }
         });
     }

@@ -75,6 +75,28 @@ public class BluetoothConnectionManager {
     public interface ScanCallback {
         void onDeviceFound(BluetoothDevice device, int rssi);
         void onScanComplete();
+
+        /**
+         * 扫描失败回调（默认空实现，向后兼容）
+         * @param errorCode Android BluetoothLeScanner 的 SCAN_FAILED_* 错误码
+         * @param message 人类可读的错误说明
+         */
+        default void onScanError(int errorCode, String message) { }
+    }
+
+    /**
+     * 把 Android BLE 扫描错误码转成人类可读的说明
+     */
+    public static String describeScanError(int errorCode) {
+        switch (errorCode) {
+            case 1: return "SCAN_FAILED_ALREADY_STARTED (扫描已在进行中)";
+            case 2: return "SCAN_FAILED_APPLICATION_REGISTRATION_FAILED (权限或系统注册失败，常见于缺少 BLUETOOTH_SCAN 或位置权限)";
+            case 3: return "SCAN_FAILED_INTERNAL_ERROR (系统内部错误)";
+            case 4: return "SCAN_FAILED_FEATURE_UNSUPPORTED (设备不支持 BLE 扫描)";
+            case 5: return "SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES (硬件资源不足)";
+            case 6: return "SCAN_FAILED_SCANNING_TOO_FREQUENTLY (扫描过于频繁，30 秒内启动超过 5 次会被系统限流，请等 30 秒再试)";
+            default: return "未知错误码: " + errorCode;
+        }
     }
 
     /**
@@ -176,8 +198,16 @@ public class BluetoothConnectionManager {
     /**
      * Android 5.0+ 扫描
      *
-     * 注意：不使用 ScanFilter.setDeviceName("LOCK_") —— 该方法是精确匹配，
-     * 无法用作前缀过滤。改为在 onScanResult 回调里用 startsWith("LOCK_") 过滤。
+     * 为了在各种 Android 实现上都能可靠工作，这里尝试两级过滤：
+     * 1) ScanFilter 层面：同时尝试按设备名 "LOCK_" 和 Nordic UART 服务 UUID 过滤
+     *    （多个 filter 之间是 OR 关系：任一 filter 匹配即返回）
+     * 2) 在 onScanResult 回调里用 startsWith("LOCK_") 再次过滤，作为最后的保险
+     *
+     * 之前的版本只用 setDeviceName("LOCK_") 就能扫到 LOCK_xxxx 开头的设备，
+     * 所以这里保留它。同时加一条基于 Service UUID 的 filter 作为兜底。
+     *
+     * 注意：不能传 null 或空列表 —— 部分 Android 12+ 实现对此处理异常，
+     * 会直接返回 SCAN_FAILED_APPLICATION_REGISTRATION_FAILED（错误码 2）。
      */
     @SuppressLint("MissingPermission")
     @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
@@ -195,6 +225,15 @@ public class BluetoothConnectionManager {
                 .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build();
 
+        // 过滤器：设备名 "LOCK_" + Nordic UART Service UUID（两者任一匹配即可）
+        List<android.bluetooth.le.ScanFilter> filters = new ArrayList<>();
+        filters.add(new android.bluetooth.le.ScanFilter.Builder()
+                .setDeviceName("LOCK_")
+                .build());
+        filters.add(new android.bluetooth.le.ScanFilter.Builder()
+                .setServiceUuid(new android.os.ParcelUuid(NORDIC_UART_SERVICE_UUID))
+                .build());
+
         leScanCallback = new android.bluetooth.le.ScanCallback() {
             @Override
             public void onScanResult(int callbackType, android.bluetooth.le.ScanResult result) {
@@ -203,7 +242,7 @@ public class BluetoothConnectionManager {
 
                 Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
 
-                // 只处理名称以 LOCK_ 开头的设备
+                // 仍然在回调里做一次前缀过滤，防止 Service UUID filter 匹配到非锁设备
                 if (name != null && name.startsWith("LOCK_")) {
                     if (scanCallback != null) {
                         scanCallback.onDeviceFound(device, result.getRssi());
@@ -218,15 +257,16 @@ public class BluetoothConnectionManager {
 
             @Override
             public void onScanFailed(int errorCode) {
-                Log.e(TAG, "扫描失败: " + errorCode);
+                String reason = describeScanError(errorCode);
+                Log.e(TAG, "扫描失败: " + errorCode + " - " + reason);
                 if (scanCallback != null) {
+                    scanCallback.onScanError(errorCode, reason);
                     scanCallback.onScanComplete();
                 }
             }
         };
 
-        // 不传 filters（null）以便在回调中自行做前缀过滤
-        scanner.startScan(null, settings, leScanCallback);
+        scanner.startScan(filters, settings, leScanCallback);
     }
 
     /**
