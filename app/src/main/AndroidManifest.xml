@@ -3,22 +3,16 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 蓝牙权限 -->
-    <uses-permission android:name="android.permission.BLUETOOTH"
-        android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
-        android:maxSdkVersion="30" />
-    <!-- Android 12+ 蓝牙权限。neverForLocation 表示我们不用 BLE 扫描做位置推断，
-         这样就不再强制要求 ACCESS_FINE_LOCATION 作为前置条件。 -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation"
-        tools:targetApi="s" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <!-- Android 12+ 蓝牙权限。注意：不加 neverForLocation 标志，
+         MIUI 某些版本对此标志处理异常，会导致 BLE 扫描注册失败 (error 2)。 -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- 位置权限：仅 Android 11 及以下 BLE 扫描需要 -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
-        android:maxSdkVersion="30" />
+    <!-- 位置权限：BLE 扫描在 MIUI 上即使到 Android 12+ 仍需要此权限 -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     
     <!-- 蓝牙功能 -->
     <uses-feature

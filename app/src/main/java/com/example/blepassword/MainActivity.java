@@ -208,9 +208,16 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private boolean checkPermissions() {
+        List<String> missing = new ArrayList<>();
+
+        // 位置权限（所有 Android 版本都要求 —— MIUI 即使在 Android 12+ 也强制要求）
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        }
+
         // Android 12 (API 31) 及以上需要动态请求 BLUETOOTH_SCAN / BLUETOOTH_CONNECT
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            List<String> missing = new ArrayList<>();
             if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
                     != PackageManager.PERMISSION_GRANTED) {
                 missing.add(Manifest.permission.BLUETOOTH_SCAN);
@@ -219,20 +226,12 @@ public class MainActivity extends AppCompatActivity {
                     != PackageManager.PERMISSION_GRANTED) {
                 missing.add(Manifest.permission.BLUETOOTH_CONNECT);
             }
-            if (!missing.isEmpty()) {
-                appendLog("⚠️  需要蓝牙运行时权限 (Android 12+)");
-                requestPermissions(missing.toArray(new String[0]), REQUEST_BLUETOOTH_PERMISSIONS);
-                return false;
-            }
-        } else {
-            // Android 11 及以下：BLE 扫描需要位置权限
-            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                    != PackageManager.PERMISSION_GRANTED) {
-                appendLog("⚠️  需要位置权限才能扫描蓝牙设备");
-                requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
-                        REQUEST_LOCATION_PERMISSION);
-                return false;
-            }
+        }
+
+        if (!missing.isEmpty()) {
+            appendLog("⚠️  需要运行时权限: " + missing);
+            requestPermissions(missing.toArray(new String[0]), REQUEST_BLUETOOTH_PERMISSIONS);
+            return false;
         }
 
         // 检查蓝牙是否开启

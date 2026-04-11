@@ -259,9 +259,16 @@ public class BluetoothConnectionManager {
             public void onScanFailed(int errorCode) {
                 String reason = describeScanError(errorCode);
                 Log.e(TAG, "扫描失败: " + errorCode + " - " + reason);
-                if (scanCallback != null) {
-                    scanCallback.onScanError(errorCode, reason);
-                    scanCallback.onScanComplete();
+
+                // 清理状态，避免 10 秒 timeout 又触发一次 stopScan → 重复日志
+                isScanning = false;
+                scanTimeoutHandler.removeCallbacksAndMessages(null);
+
+                ScanCallback cb = scanCallback;
+                scanCallback = null;
+                if (cb != null) {
+                    cb.onScanError(errorCode, reason);
+                    cb.onScanComplete();
                 }
             }
         };
