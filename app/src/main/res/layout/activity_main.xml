@@ -72,7 +72,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="密码编码：ASCII编码（固件确认）"
+        android:text="密码编码：数值编码 | 加密：AES-128-ECB"
         android:textSize="12sp"
         android:textStyle="bold"
         android:layout_marginTop="8dp"

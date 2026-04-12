@@ -13,8 +13,6 @@ import android.text.method.ScrollingMovementMethod;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
-import android.view.ViewGroup;
-import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -25,72 +23,75 @@ import android.widget.Toast;
 
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
 
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * 主界面：蓝牙锁密码修改工具（最终修复版 - 基于SYD8811_FINAL_REAL_FIX.bin固件）
- * 
- * 固件功能确认：
- * - 支持0x21密码修改命令（REAL_0x21_FUNCTION）
- * - 密码编码：ASCII字符编码（例如："123456" -> 0x31 0x32 0x33 0x34 0x35 0x36）
- * - 校验和算法：累加+异或双重校验 checksum = XOR(all bytes) + SUM(all bytes)
- * - 两步验证：先0x20验证旧密码 → 再0x21修改新密码
- * - 默认密码：000000
- * 
- * 工作流程：
- * 1. 扫描设备
- * 2. 连接设备
- * 3. 验证密码（0x20命令）
- * 4. 修改密码（0x21命令）
- * 5. 等待设备响应
- * 6. 显示修改成功或失败
+ * 蓝牙锁密码修改工具 —— 基于 4G-BLE-093 固件源码逆向工程重写
+ *
+ * 协议要点（来自固件）：
+ * - BLE Service UUID: 0x000A (VendorV2)
+ * - 通信全程 AES-128-ECB 加密
+ * - 密码编码：数字值（0-9），不是 ASCII
+ * - 校验和：BCC 简单加法
+ * - 密钥：基于 MAC 地址 + 时间
+ *
+ * 密码修改完整流程：
+ * 1. 扫描 LOCK_ 设备
+ * 2. 连接 + 订阅通知
+ * 3. 发送 SET_TIME (0x10) → 切换到 key2
+ * 4. 发送 AUTH_PASSWD (0x20, 旧密码) → 验证身份
+ * 5. 发送 SET_AUTH_PASSWD (0x21, 新密码) → 修改密码
+ * 6. 显示结果
  */
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "MainActivity";
-    
-    private static final int REQUEST_BLUETOOTH_PERMISSIONS = 1;
-    private static final int REQUEST_LOCATION_PERMISSION = 2;
-    
+    private static final int REQUEST_PERMISSIONS = 1;
+
     private BluetoothConnectionManager bluetoothManager;
 
-    private Button btnScan;
-    private Button btnConnect;
-    private Button btnChangePassword;
-    private Button btnReset;
-    private Button btnTestSend;
-    private Button btnViewLog;
+    // UI 组件
+    private Button btnScan, btnConnect, btnChangePassword, btnReset, btnTestSend, btnViewLog;
     private ListView listViewDevices;
     private EditText editNewPassword;
-    private TextView textStatus;
-    private TextView textLog;
+    private TextView textStatus, textLog;
     private ScrollView scrollView;
-    
+
+    // 设备列表
     private ArrayAdapter<String> devicesAdapter;
     private List<BluetoothDevice> devicesList = new ArrayList<>();
     private Map<String, BluetoothDevice> devicesMap = new HashMap<>();
-    
+
     private BluetoothDevice selectedDevice;
     private int selectedDevicePosition = -1;
     private boolean isConnected = false;
 
-    // 日志缓存
+    // 日志
     private StringBuilder logBuffer = new StringBuilder();
+
+    // 密码修改流程状态机
+    private enum FlowStep {
+        IDLE,
+        WAITING_SET_TIME,
+        WAITING_AUTH,
+        WAITING_SET_PASSWD
+    }
+    private FlowStep currentStep = FlowStep.IDLE;
+    private String pendingNewPassword;  // 暂存用户输入的新密码
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        
         initViews();
         initBluetoothManager();
         setupListeners();
     }
-    
+
     private void initViews() {
         btnScan = findViewById(R.id.btnScan);
         btnConnect = findViewById(R.id.btnConnect);
@@ -106,117 +107,62 @@ public class MainActivity extends AppCompatActivity {
 
         devicesAdapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1);
         listViewDevices.setAdapter(devicesAdapter);
-
-        // 使日志可滚动
         textLog.setMovementMethod(new ScrollingMovementMethod());
 
         updateUIState();
         textStatus.setText("准备就绪");
         appendLog("========================================");
-        appendLog("🚀 应用启动完成");
-        appendLog("版本：v11 最终修复版");
-        appendLog("协议：SYD8811");
-        appendLog("密码编码：ASCII编码（固件确认）");
-        appendLog("校验和：累加+异或双重校验（固件确认）");
+        appendLog("🚀 应用启动完成（协议重写版）");
+        appendLog("协议：SYD8811 (VendorV2 Service 0x000A)");
+        appendLog("加密：AES-128-ECB");
+        appendLog("密码编码：数值编码（0-9）");
+        appendLog("校验和：BCC 加法");
+        appendLog("流程：setTime → auth → setPasswd");
         appendLog("默认密码：000000");
         appendLog("========================================");
     }
-    
+
     private void initBluetoothManager() {
         bluetoothManager = new BluetoothConnectionManager(this);
         appendLog("✓ 蓝牙管理器初始化完成");
     }
-    
+
     private void setupListeners() {
         btnScan.setOnClickListener(v -> {
-            if (checkPermissions()) {
-                startScan();
-            }
+            if (checkPermissions()) startScan();
         });
-
         btnConnect.setOnClickListener(v -> connectDevice());
-
-        btnChangePassword.setOnClickListener(v -> changePassword());
-
-        btnTestSend.setOnClickListener(v -> testSend());
-
+        btnChangePassword.setOnClickListener(v -> startPasswordChangeFlow());
+        btnTestSend.setOnClickListener(v -> testSendSetTime());
         btnViewLog.setOnClickListener(v -> showLogDialog());
-
         btnReset.setOnClickListener(v -> resetState());
 
         listViewDevices.setOnItemClickListener((parent, view, position, id) -> {
             if (position >= 0 && position < devicesList.size()) {
                 selectedDevice = devicesList.get(position);
                 selectedDevicePosition = position;
-                String name = selectedDevice.getName() != null ? selectedDevice.getName() : "未知设备";
-                String address = selectedDevice.getAddress();
-
-                appendLog("✓ 已选择设备 [" + position + "]: " + name);
-                appendLog("  MAC地址: " + address);
-                Toast.makeText(MainActivity.this, "已选择: " + name, Toast.LENGTH_SHORT).show();
-
-                // 高亮选中的项
+                String name = selectedDevice.getName() != null ? selectedDevice.getName() : "未知";
+                appendLog("✓ 选中设备 [" + position + "]: " + name +
+                        " (" + selectedDevice.getAddress() + ")");
+                Toast.makeText(this, "已选择: " + name, Toast.LENGTH_SHORT).show();
                 listViewDevices.setItemChecked(position, true);
-            } else {
-                appendLog("错误：无效的设备索引 " + position);
+                updateUIState();
             }
         });
     }
 
-    /**
-     * 显示日志对话框
-     */
-    private void showLogDialog() {
-        AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle("完整日志");
-        
-        // 创建自定义视图
-        View dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_log, null);
-        builder.setView(dialogView);
-        
-        TextView logTextView = dialogView.findViewById(R.id.logTextView);
-        Button btnCopy = dialogView.findViewById(R.id.btnCopy);
-        Button btnClear = dialogView.findViewById(R.id.btnClear);
-        Button btnClose = dialogView.findViewById(R.id.btnClose);
-        
-        // 设置日志内容
-        logTextView.setText(logBuffer.toString());
-        logTextView.setMovementMethod(new ScrollingMovementMethod());
-        
-        // 创建对话框
-        AlertDialog dialog = builder.create();
-        dialog.show();
-        
-        // 复制按钮
-        btnCopy.setOnClickListener(v -> {
-            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            ClipData clip = ClipData.newPlainText("日志", logBuffer.toString());
-            clipboard.setPrimaryClip(clip);
-            Toast.makeText(MainActivity.this, "日志已复制到剪贴板", Toast.LENGTH_SHORT).show();
-        });
-        
-        // 清空按钮
-        btnClear.setOnClickListener(v -> {
-            logBuffer.setLength(0);
-            textLog.setText("");
-            logTextView.setText("");
-            Toast.makeText(MainActivity.this, "日志已清空", Toast.LENGTH_SHORT).show();
-        });
-        
-        // 关闭按钮
-        btnClose.setOnClickListener(v -> dialog.dismiss());
-    }
+    // ===================== 权限 =====================
 
     private boolean checkPermissions() {
         List<String> missing = new ArrayList<>();
 
-        // 位置权限（所有 Android 版本都要求 —— MIUI 即使在 Android 12+ 也强制要求）
+        // 位置权限（所有版本都需要 — Vivo/MIUI 强制要求）
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
             missing.add(Manifest.permission.ACCESS_FINE_LOCATION);
         }
 
-        // Android 12 (API 31) 及以上需要动态请求 BLUETOOTH_SCAN / BLUETOOTH_CONNECT
+        // Android 12+ 蓝牙权限
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
                     != PackageManager.PERMISSION_GRANTED) {
@@ -229,20 +175,42 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (!missing.isEmpty()) {
-            appendLog("⚠️  需要运行时权限: " + missing);
-            requestPermissions(missing.toArray(new String[0]), REQUEST_BLUETOOTH_PERMISSIONS);
+            appendLog("⚠️ 需要运行时权限: " + missing.size() + " 项");
+            requestPermissions(missing.toArray(new String[0]), REQUEST_PERMISSIONS);
             return false;
         }
 
-        // 检查蓝牙是否开启
         if (!bluetoothManager.isBluetoothEnabled()) {
-            appendLog("⚠️  蓝牙未开启");
+            appendLog("⚠️ 蓝牙未开启");
             bluetoothManager.enableBluetooth(this);
             return false;
         }
 
         return true;
     }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_PERMISSIONS) {
+            boolean allGranted = grantResults.length > 0;
+            for (int result : grantResults) {
+                if (result != PackageManager.PERMISSION_GRANTED) {
+                    allGranted = false;
+                    break;
+                }
+            }
+            if (allGranted) {
+                appendLog("✓ 权限已授予");
+                startScan();
+            } else {
+                appendLog("❌ 权限被拒绝");
+                Toast.makeText(this, "需要蓝牙和位置权限", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    // ===================== 扫描 =====================
 
     private void startScan() {
         devicesList.clear();
@@ -252,79 +220,67 @@ public class MainActivity extends AppCompatActivity {
         selectedDevicePosition = -1;
 
         appendLog("========================================");
-        appendLog("📡 开始扫描设备（仅显示 LOCK_ 开头的设备）...");
-        textStatus.setText("正在扫描设备...");
+        appendLog("📡 开始扫描 LOCK_ 设备...");
+        textStatus.setText("正在扫描...");
         btnScan.setEnabled(false);
 
         bluetoothManager.startScan(new BluetoothConnectionManager.ScanCallback() {
             @Override
             public void onDeviceFound(BluetoothDevice device, int rssi) {
                 String name = device.getName();
-                
-                // 只显示 LOCK_ 开头的设备
-                if (name != null && name.startsWith("LOCK_")) {
-                    if (!devicesMap.containsKey(device.getAddress())) {
-                        devicesMap.put(device.getAddress(), device);
-                        devicesList.add(device);
-                        String displayText = String.format("%s (%ddBm)", name, rssi);
-                        devicesAdapter.add(displayText);
-                        
-                        appendLog("  📱 找到设备: " + displayText);
-                        runOnUiThread(() -> devicesAdapter.notifyDataSetChanged());
-                    }
+                if (name != null && name.startsWith("LOCK_") &&
+                        !devicesMap.containsKey(device.getAddress())) {
+                    devicesMap.put(device.getAddress(), device);
+                    devicesList.add(device);
+                    String displayText = String.format("%s (%ddBm)", name, rssi);
+                    devicesAdapter.add(displayText);
+                    appendLog("  📱 " + displayText + " [" + device.getAddress() + "]");
+                    runOnUiThread(() -> devicesAdapter.notifyDataSetChanged());
                 }
             }
 
             @Override
             public void onScanComplete() {
                 appendLog("✓ 扫描完成，找到 " + devicesList.size() + " 个设备");
-                textStatus.setText("扫描完成");
-                btnScan.setEnabled(true);
-
-                if (devicesList.isEmpty()) {
-                    appendLog("⚠️  未找到 LOCK_ 开头的设备");
-                    Toast.makeText(MainActivity.this, "未找到 LOCK_ 开头的设备", Toast.LENGTH_SHORT).show();
-                }
+                runOnUiThread(() -> {
+                    textStatus.setText("扫描完成");
+                    btnScan.setEnabled(true);
+                    if (devicesList.isEmpty()) {
+                        Toast.makeText(MainActivity.this, "未找到 LOCK_ 设备", Toast.LENGTH_SHORT).show();
+                    }
+                });
             }
 
             @Override
             public void onScanError(int errorCode, String message) {
                 appendLog("❌ 扫描失败 [errorCode=" + errorCode + "]");
                 appendLog("   原因: " + message);
-                appendLog("💡 请截图此日志发给开发者定位问题");
-                textStatus.setText("扫描失败: " + errorCode);
+                runOnUiThread(() -> textStatus.setText("扫描失败: " + errorCode));
             }
         });
     }
 
+    // ===================== 连接 =====================
+
     private void connectDevice() {
         if (selectedDevice == null) {
-            appendLog("❌ 错误：未选择设备");
-            appendLog("💡 请先点击列表中的设备进行选择");
-            Toast.makeText(this, "请先点击列表中的设备进行选择", Toast.LENGTH_LONG).show();
+            appendLog("❌ 未选择设备");
+            Toast.makeText(this, "请先选择设备", Toast.LENGTH_LONG).show();
             return;
         }
 
-        String name = selectedDevice.getName() != null ? selectedDevice.getName() : "未知设备";
+        String name = selectedDevice.getName() != null ? selectedDevice.getName() : "未知";
+        String mac = selectedDevice.getAddress();
         appendLog("========================================");
-        appendLog("🔗 正在连接设备: " + name);
-        appendLog("   位置: [" + selectedDevicePosition + "]");
-        appendLog("   MAC: " + selectedDevice.getAddress());
-        textStatus.setText("正在连接设备...");
+        appendLog("🔗 连接设备: " + name + " (" + mac + ")");
+        appendLog("   生成 AES 密钥中...");
+        textStatus.setText("正在连接...");
         btnConnect.setEnabled(false);
 
         bluetoothManager.connect(selectedDevice, new BluetoothConnectionManager.ConnectionCallbackWithInfo() {
             @Override
             public void onServicesDiscovered(String info) {
-                appendLog("📋 服务发现信息：");
-                appendLog(info);
-                
-                // 检查是否包含Nordic UART服务
-                if (info.contains("6e400007")) {
-                    appendLog("✓ 找到 Nordic UART 服务");
-                } else {
-                    appendLog("❌ 未找到 Nordic UART 服务");
-                }
+                appendLog("📋 " + info);
             }
 
             @Override
@@ -333,9 +289,14 @@ public class MainActivity extends AppCompatActivity {
                     isConnected = true;
                     updateUIState();
                     textStatus.setText("已连接: " + name);
+
                     appendLog("✅ 连接成功！");
-                    appendLog("💡 现在可以测试发送数据或修改密码");
+                    appendLog("   Key1: " + HexStringUtils.bytesToHexString(bluetoothManager.getAesKey1()));
+                    appendLog("   Key2: " + HexStringUtils.bytesToHexString(bluetoothManager.getAesKey2()));
+                    appendLog("💡 点击"测试发送"发送 SET_TIME");
+                    appendLog("💡 或直接点"修改密码"");
                     appendLog("========================================");
+
                     Toast.makeText(MainActivity.this, "连接成功", Toast.LENGTH_SHORT).show();
                 });
             }
@@ -344,364 +305,348 @@ public class MainActivity extends AppCompatActivity {
             public void onDisconnected() {
                 runOnUiThread(() -> {
                     isConnected = false;
+                    currentStep = FlowStep.IDLE;
                     updateUIState();
-                    textStatus.setText("已断开连接");
-                    appendLog("⚠ 连接已断开");
+                    textStatus.setText("已断开");
+                    appendLog("⚠ 连接断开");
                 });
             }
 
             @Override
             public void onConnectionFailed(String error) {
                 runOnUiThread(() -> {
-                    textStatus.setText("连接失败: " + error);
+                    textStatus.setText("连接失败");
                     btnConnect.setEnabled(true);
                     appendLog("❌ 连接失败: " + error);
-                    appendLog("========================================");
                     Toast.makeText(MainActivity.this, "连接失败: " + error, Toast.LENGTH_LONG).show();
                 });
             }
         });
     }
 
-    /**
-     * 测试发送功能 - 发送简单的测试数据
-     */
-    private void testSend() {
+    // ===================== 测试发送（SET_TIME） =====================
+
+    private void testSendSetTime() {
         if (!isConnected) {
-            appendLog("❌ 错误：未连接设备");
             Toast.makeText(this, "请先连接设备", Toast.LENGTH_SHORT).show();
             return;
         }
 
         appendLog("========================================");
-        appendLog("🧪 开始测试发送");
-        
-        // 发送简单的测试数据：55 01 40 00 00 00 00 00 00 CS (状态查询)
-        byte[] testData = BleLockSdk.getStatusRequest((byte)0x00);
-        
-        appendLog("发送测试数据: " + HexStringUtils.bytesToHexString(testData));
-        appendLog("   这是状态查询命令，应该会收到响应");
-        textStatus.setText("正在测试发送...");
+        appendLog("🧪 发送 SET_TIME (0x10) 命令");
+
+        Date now = new Date();
+        byte[] request = BleLockSdk.setTimeRequest(now);
+        appendLog("   明文请求: " + HexStringUtils.bytesToHexString(request));
+
+        // SET_TIME 用 key1 加密（因为此时还没完成时间设置）
+        byte[] key = bluetoothManager.getAesKey1();
+        textStatus.setText("正在发送 SET_TIME...");
         btnTestSend.setEnabled(false);
 
-        new Thread(() -> {
-            try {
-                boolean sendResult = bluetoothManager.sendData(testData, new BluetoothConnectionManager.DataCallback() {
-                    @Override
-                    public void onDataReceived(byte[] data) {
-                        if (data != null && data.length > 0) {
-                            appendLog("✅ 收到测试响应: " + HexStringUtils.bytesToHexString(data));
-                            appendLog("   数据长度: " + data.length + " 字节");
-                            
-                            BleLockSdk.Response response = BleLockSdk.parseResponse(data);
-                            
-                            runOnUiThread(() -> {
-                                if (response.success) {
-                                    appendLog("✓ 响应解析成功");
-                                    appendLog("   命令: 0x" + String.format("%02X", response.cmd));
-                                    appendLog("   状态: 0x" + String.format("%02X", response.status));
-                                    textStatus.setText("测试成功");
-                                    Toast.makeText(MainActivity.this, "测试成功！", Toast.LENGTH_SHORT).show();
-                                } else {
-                                    appendLog("❌ 响应解析失败: " + response.error);
-                                    textStatus.setText("测试失败");
-                                }
-                                btnTestSend.setEnabled(true);
-                            });
-                        }
-                    }
-
-                    @Override
-                    public void onDataSent(boolean success) {
-                        if (!success) {
-                            runOnUiThread(() -> {
-                                textStatus.setText("发送失败");
-                                appendLog("❌ 测试数据发送失败");
-                                appendLog("========================================");
-                                btnTestSend.setEnabled(true);
-                                Toast.makeText(MainActivity.this, "发送失败", Toast.LENGTH_SHORT).show();
-                            });
-                        } else {
-                            appendLog("✓ 测试数据发送成功，等待响应...");
-                        }
-                    }
-                });
-
-                if (!sendResult) {
+        bluetoothManager.sendEncryptedData(request, key, new BluetoothConnectionManager.DataCallback() {
+            @Override
+            public void onDataReceived(byte[] encryptedData) {
+                // 解密响应（SET_TIME 的响应用 key1 解密）
+                byte[] decrypted = ProtoUtil.decryptResponse(key, encryptedData);
+                if (decrypted != null) {
+                    BleLockSdk.Response response = BleLockSdk.parseResponse(decrypted);
                     runOnUiThread(() -> {
-                        textStatus.setText("发送失败");
-                        appendLog("❌ 发送测试数据失败");
-                        appendLog("========================================");
+                        if (response.success && response.isSetTimeSuccess()) {
+                            bluetoothManager.setTimeSetSuccess(true);
+                            // 更新 key2 为当前时间
+                            bluetoothManager.getAesKey2();  // key2 已在 connect 时生成
+                            appendLog("✅ SET_TIME 成功！已切换到 key2");
+                            textStatus.setText("SET_TIME 成功");
+                        } else {
+                            appendLog("❌ SET_TIME 响应异常: " +
+                                    (response.success ? "cmd=0x" + String.format("%02X", response.cmd) : response.error));
+                            textStatus.setText("SET_TIME 失败");
+                        }
                         btnTestSend.setEnabled(true);
-                        Toast.makeText(MainActivity.this, "发送失败", Toast.LENGTH_SHORT).show();
+                    });
+                } else {
+                    runOnUiThread(() -> {
+                        appendLog("❌ 解密 SET_TIME 响应失败");
+                        textStatus.setText("解密失败");
+                        btnTestSend.setEnabled(true);
                     });
                 }
+            }
 
-                new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                    if (!btnTestSend.isEnabled()) {
-                        runOnUiThread(() -> {
-                            textStatus.setText("测试超时");
-                            appendLog("⏰ 测试超时（10秒未收到响应）");
-                            appendLog("💡 可能原因：");
-                            appendLog("   1. 设备不支持此命令");
-                            appendLog("   2. 通知未启用");
-                            appendLog("   3. TX/RX UUID配置错误");
-                            appendLog("========================================");
-                            btnTestSend.setEnabled(true);
-                            Toast.makeText(MainActivity.this, "测试超时", Toast.LENGTH_SHORT).show();
-                        });
-                    }
-                }, 10000);
-            } catch (Exception e) {
+            @Override
+            public void onDataSent(boolean success) {
+                if (success) {
+                    appendLog("✓ SET_TIME 数据已发送，等待响应...");
+                } else {
+                    runOnUiThread(() -> {
+                        appendLog("❌ SET_TIME 发送失败");
+                        textStatus.setText("发送失败");
+                        btnTestSend.setEnabled(true);
+                    });
+                }
+            }
+        });
+
+        // 超时
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (!btnTestSend.isEnabled()) {
                 runOnUiThread(() -> {
-                    textStatus.setText("异常: " + e.getMessage());
-                    appendLog("❌ 异常: " + e.getMessage());
-                    e.printStackTrace();
-                    appendLog("========================================");
+                    appendLog("⏰ SET_TIME 超时");
+                    textStatus.setText("SET_TIME 超时");
                     btnTestSend.setEnabled(true);
                 });
             }
-        }).start();
+        }, 10000);
     }
 
-    private void changePassword() {
+    // ===================== 密码修改流程（状态机） =====================
+
+    private void startPasswordChangeFlow() {
         if (!isConnected) {
-            appendLog("❌ 错误：未连接设备");
             Toast.makeText(this, "请先连接设备", Toast.LENGTH_SHORT).show();
             return;
         }
 
         String newPassword = editNewPassword.getText().toString().trim();
-
-        if (newPassword.isEmpty()) {
-            appendLog("❌ 错误：新密码为空");
-            Toast.makeText(this, "请输入新密码", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        if (newPassword.length() != 6 || !newPassword.matches("\\d+")) {
-            appendLog("❌ 错误：新密码必须是6位数字");
+        if (newPassword.isEmpty() || newPassword.length() != 6 || !newPassword.matches("\\d+")) {
             Toast.makeText(this, "密码必须是 6 位数字", Toast.LENGTH_SHORT).show();
             return;
         }
 
-        appendLog("========================================");
-        appendLog("🔄 开始修改密码");
-        appendLog("   原密码: 000000 (默认)");
-        appendLog("   新密码: " + newPassword);
-        appendLog("   协议: SYD8811");
-        appendLog("   编码: ASCII编码（例如：'1' -> 0x31）");
-        appendLog("   校验和: 累加+异或双重校验");
-        appendLog("   命令流程: 0x20验证 → 0x21修改");
-        appendLog("💡 根据固件分析，必须先验证旧密码");
-
-        textStatus.setText("正在验证密码...");
+        pendingNewPassword = newPassword;
         btnChangePassword.setEnabled(false);
 
-        // 步骤1：先验证初始密码（0x20命令）
-        byte[] authData = BleLockSdk.authPasswdRequest("000000");
-        appendLog("📤 步骤1/2: 验证初始密码 000000");
-        appendLog("   发送: " + HexStringUtils.bytesToHexString(authData));
+        appendLog("========================================");
+        appendLog("🔄 开始密码修改流程");
+        appendLog("   旧密码: 000000（默认）");
+        appendLog("   新密码: " + newPassword);
+        appendLog("========================================");
 
-        new Thread(() -> {
-            try {
-                // 发送验证请求
-                boolean authResult = bluetoothManager.sendData(authData, new BluetoothConnectionManager.DataCallback() {
-                    @Override
-                    public void onDataReceived(byte[] data) {
-                        if (data != null && data.length > 0) {
-                            appendLog("📨 收到验证响应: " + HexStringUtils.bytesToHexString(data));
-                            appendLog("   数据长度: " + data.length + " 字节");
+        // 步骤 1：发送 SET_TIME
+        currentStep = FlowStep.WAITING_SET_TIME;
+        sendSetTimeForFlow();
+    }
 
-                            BleLockSdk.Response authResponse = BleLockSdk.parseResponse(data);
+    /** 步骤 1：发送 SET_TIME (0x10) */
+    private void sendSetTimeForFlow() {
+        appendLog("📤 步骤 1/3: 发送 SET_TIME (0x10)");
+        textStatus.setText("步骤 1/3: 设置时间...");
 
-                            if (authResponse.success && authResponse.cmd == BleLockSdk.CMD_AUTH_PASSWD) {
-                                if (authResponse.status == BleLockSdk.RESULT_SUCCESS) {
-                                    appendLog("✅ 密码验证成功");
-                                    appendLog("📤 步骤2/2: 修改密码为 " + newPassword);
+        Date now = new Date();
+        byte[] request = BleLockSdk.setTimeRequest(now);
+        byte[] key = bluetoothManager.getAesKey1();  // SET_TIME 用 key1
 
-                                    // 步骤2：修改密码（0x21命令）
-                                    byte[] changeData = BleLockSdk.setAuthPasswdRequest(newPassword);
-                                    appendLog("发送修改数据: " + HexStringUtils.bytesToHexString(changeData));
-                                    appendLog("   帧头: 0x" + String.format("%02X", changeData[0]));
-                                    appendLog("   类型: 0x" + String.format("%02X", changeData[1]));
-                                    appendLog("   命令: 0x" + String.format("%02X", changeData[2]));
-                                    appendLog("   新密码(ASCII): " + HexStringUtils.bytesToHexString(changeData, 3, 6));
-                                    appendLog("   示例: '1' -> 0x31, '2' -> 0x32");
-                                    appendLog("   校验和: 0x" + String.format("%02X", changeData[9]));
-                                    appendLog("   校验算法: 累加+异或双重校验");
+        appendLog("   明文: " + HexStringUtils.bytesToHexString(request));
 
-                                    // 发送修改请求
-                                    boolean changeResult = bluetoothManager.sendData(changeData, new BluetoothConnectionManager.DataCallback() {
-                                        @Override
-                                        public void onDataReceived(byte[] data) {
-                                            if (data != null && data.length > 0) {
-                                                appendLog("📨 收到修改响应: " + HexStringUtils.bytesToHexString(data));
-                                                appendLog("   数据长度: " + data.length + " 字节");
+        boolean sent = bluetoothManager.sendEncryptedData(request, key, flowDataCallback);
+        if (!sent) {
+            appendLog("❌ SET_TIME 发送失败");
+            resetFlow();
+        }
+    }
 
-                                                BleLockSdk.Response changeResponse = BleLockSdk.parseResponse(data);
+    /** 步骤 2：发送 AUTH_PASSWD (0x20) */
+    private void sendAuthForFlow() {
+        appendLog("📤 步骤 2/3: 验证密码 (0x20) 密码=000000");
+        textStatus.setText("步骤 2/3: 验证密码...");
 
-                                                runOnUiThread(() -> {
-                                                    if (changeResponse.success && changeResponse.cmd == BleLockSdk.CMD_SET_AUTH_PASSWD) {
-                                                        Byte result = changeResponse.getSetAuthPasswdResult();
-                                                        if (result != null && result == BleLockSdk.RESULT_SUCCESS) {
-                                                            textStatus.setText("密码修改成功");
-                                                            appendLog("✅ 密码修改成功！");
-                                                            appendLog("   新密码已生效: " + newPassword);
-                                                            appendLog("   状态码: 0x" + String.format("%02X", changeResponse.status));
-                                                            appendLog("💡 下次连接需要使用新密码");
-                                                            appendLog("========================================");
-                                                            Toast.makeText(MainActivity.this, "密码修改成功！新密码: " + newPassword, Toast.LENGTH_LONG).show();
-                                                        } else {
-                                                            textStatus.setText("密码修改失败");
-                                                            appendLog("❌ 密码修改失败");
-                                                            appendLog("   状态码: 0x" + String.format("%02X", changeResponse.status));
-                                                            appendLog("💡 可能原因：");
-                                                            appendLog("   1. 初始密码不是 000000");
-                                                            appendLog("   2. 设备固件不支持此操作");
-                                                            appendLog("   3. 校验和计算错误");
-                                                            appendLog("   4. 密码编码方式不匹配");
-                                                            appendLog("========================================");
-                                                            Toast.makeText(MainActivity.this, "密码修改失败", Toast.LENGTH_SHORT).show();
-                                                        }
-                                                    } else {
-                                                        textStatus.setText("响应错误");
-                                                        appendLog("❌ 响应解析错误: " + (changeResponse.success ? "命令不匹配" : changeResponse.error));
-                                                        appendLog("========================================");
-                                                        Toast.makeText(MainActivity.this, "响应错误", Toast.LENGTH_SHORT).show();
-                                                    }
-                                                    btnChangePassword.setEnabled(true);
-                                                });
-                                            }
-                                        }
+        byte[] request = BleLockSdk.authPasswdRequest(0);  // 000000
+        byte[] key = bluetoothManager.getCurrentKey();  // 已切换到 key2
 
-                                        @Override
-                                        public void onDataSent(boolean success) {
-                                            if (!success) {
-                                                runOnUiThread(() -> {
-                                                    textStatus.setText("发送失败");
-                                                    appendLog("❌ 修改数据发送失败");
-                                                    appendLog("========================================");
-                                                    btnChangePassword.setEnabled(true);
-                                                });
-                                            } else {
-                                                appendLog("✓ 修改数据发送成功，等待响应...");
-                                            }
-                                        }
-                                    });
+        appendLog("   明文: " + HexStringUtils.bytesToHexString(request));
 
-                                    if (!changeResult) {
-                                        runOnUiThread(() -> {
-                                            textStatus.setText("发送失败");
-                                            appendLog("❌ 发送修改数据失败");
-                                            appendLog("========================================");
-                                            btnChangePassword.setEnabled(true);
-                                        });
-                                    }
-                                } else {
-                                    runOnUiThread(() -> {
-                                        textStatus.setText("密码验证失败");
-                                        appendLog("❌ 密码验证失败");
-                                        appendLog("   状态码: 0x" + String.format("%02X", authResponse.status));
-                                        appendLog("💡 可能原因：初始密码不是 000000");
-                                        appendLog("========================================");
-                                        btnChangePassword.setEnabled(true);
-                                        Toast.makeText(MainActivity.this, "密码验证失败", Toast.LENGTH_SHORT).show();
-                                    });
-                                }
-                            } else {
-                                runOnUiThread(() -> {
-                                    textStatus.setText("验证响应错误");
-                                    appendLog("❌ 验证响应解析错误: " + (authResponse.success ? "命令不匹配" : authResponse.error));
-                                    appendLog("========================================");
-                                    btnChangePassword.setEnabled(true);
-                                    Toast.makeText(MainActivity.this, "验证响应错误", Toast.LENGTH_SHORT).show();
-                                });
-                            }
-                        }
-                    }
+        boolean sent = bluetoothManager.sendEncryptedData(request, key, flowDataCallback);
+        if (!sent) {
+            appendLog("❌ AUTH 发送失败");
+            resetFlow();
+        }
+    }
 
-                    @Override
-                    public void onDataSent(boolean success) {
-                        if (!success) {
-                            runOnUiThread(() -> {
-                                textStatus.setText("发送失败");
-                                appendLog("❌ 验证数据发送失败");
-                                appendLog("========================================");
-                                btnChangePassword.setEnabled(true);
-                                Toast.makeText(MainActivity.this, "发送失败", Toast.LENGTH_SHORT).show();
-                            });
-                        } else {
-                            appendLog("✓ 验证数据发送成功，等待响应...");
-                        }
-                    }
-                });
+    /** 步骤 3：发送 SET_AUTH_PASSWD (0x21) */
+    private void sendSetPasswdForFlow() {
+        int newPassInt = Integer.parseInt(pendingNewPassword);
+        appendLog("📤 步骤 3/3: 修改密码 (0x21) 新密码=" + pendingNewPassword);
+        textStatus.setText("步骤 3/3: 修改密码...");
 
-                if (!authResult) {
-                    runOnUiThread(() -> {
-                        textStatus.setText("发送失败");
-                        appendLog("❌ 发送验证数据失败");
-                        appendLog("========================================");
-                        btnChangePassword.setEnabled(true);
-                        Toast.makeText(MainActivity.this, "发送失败", Toast.LENGTH_SHORT).show();
-                    });
-                }
+        byte[] request = BleLockSdk.setAuthPasswdRequest(newPassInt);
+        byte[] key = bluetoothManager.getCurrentKey();  // key2
 
-                // 超时处理（总超时时间60秒：验证30秒 + 修改30秒）
-                new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                    if (!btnChangePassword.isEnabled()) {
-                        runOnUiThread(() -> {
-                            textStatus.setText("修改超时");
-                            appendLog("⏰ 修改超时（60秒未完成）");
-                            appendLog("💡 可能原因：");
-                            appendLog("   1. 设备不支持此协议");
-                            appendLog("   2. 设备未正确启用通知");
-                            appendLog("   3. 固件未正确响应");
-                            appendLog("   4. 初始密码不是 000000");
-                            appendLog("   5. Flash写入时间较长");
-                            appendLog("   6. 密码编码方式不匹配（必须是ASCII）");
-                            appendLog("   7. 校验和计算错误（必须是累加+异或）");
-                            appendLog("========================================");
-                            appendLog("📊 调试信息：");
-                            appendLog("   设备名称: " + selectedDevice.getName());
-                            appendLog("   设备地址: " + selectedDevice.getAddress());
-                            appendLog("   当前固件: SYD8811_FINAL_REAL_FIX.bin");
-                            appendLog("   密码编码: ASCII编码（固件确认）");
-                            appendLog("   校验和: 累加+异或双重校验（固件确认）");
-                            appendLog("========================================");
-                            btnChangePassword.setEnabled(true);
-                            Toast.makeText(MainActivity.this, "操作超时（60秒）", Toast.LENGTH_LONG).show();
-                        });
-                    }
-                }, 60000);
-            } catch (Exception e) {
+        appendLog("   明文: " + HexStringUtils.bytesToHexString(request));
+
+        boolean sent = bluetoothManager.sendEncryptedData(request, key, flowDataCallback);
+        if (!sent) {
+            appendLog("❌ SET_PASSWD 发送失败");
+            resetFlow();
+        }
+    }
+
+    /** 统一的数据回调 —— 根据 currentStep 路由到不同处理 */
+    private final BluetoothConnectionManager.DataCallback flowDataCallback =
+            new BluetoothConnectionManager.DataCallback() {
+        @Override
+        public void onDataReceived(byte[] encryptedData) {
+            // 根据当前步骤选择解密密钥
+            byte[] key;
+            if (currentStep == FlowStep.WAITING_SET_TIME) {
+                key = bluetoothManager.getAesKey1();  // SET_TIME 响应用 key1 解密
+            } else {
+                key = bluetoothManager.getCurrentKey();  // 后续步骤用 key2
+            }
+
+            byte[] decrypted = ProtoUtil.decryptResponse(key, encryptedData);
+            if (decrypted == null) {
                 runOnUiThread(() -> {
-                    textStatus.setText("异常: " + e.getMessage());
-                    appendLog("❌ 异常: " + e.getMessage());
-                    e.printStackTrace();
-                    appendLog("========================================");
-                    btnChangePassword.setEnabled(true);
+                    appendLog("❌ 解密失败（密钥可能不匹配）");
+                    appendLog("   加密数据: " + HexStringUtils.bytesToHexString(encryptedData));
+                    appendLog("   使用密钥: " + HexStringUtils.bytesToHexString(key));
+                    resetFlow();
+                });
+                return;
+            }
+
+            BleLockSdk.Response response = BleLockSdk.parseResponse(decrypted);
+            appendLog("📨 收到响应: cmd=0x" + String.format("%02X", response.cmd & 0xFF) +
+                    " payload=" + HexStringUtils.bytesToHexString(response.payload));
+
+            runOnUiThread(() -> handleFlowResponse(response));
+        }
+
+        @Override
+        public void onDataSent(boolean success) {
+            if (success) {
+                appendLog("✓ 数据已发送，等待响应...");
+            } else {
+                runOnUiThread(() -> {
+                    appendLog("❌ 数据发送失败");
+                    resetFlow();
                 });
             }
-        }).start();
+        }
+    };
+
+    /** 根据状态机处理响应 */
+    private void handleFlowResponse(BleLockSdk.Response response) {
+        switch (currentStep) {
+            case WAITING_SET_TIME:
+                if (response.success && response.isSetTimeSuccess()) {
+                    appendLog("✅ SET_TIME 成功，切换到 key2");
+                    bluetoothManager.setTimeSetSuccess(true);
+                    // 进入步骤 2
+                    currentStep = FlowStep.WAITING_AUTH;
+                    // 短暂延迟确保固件切换密钥
+                    new Handler(Looper.getMainLooper()).postDelayed(this::sendAuthForFlow, 200);
+                } else {
+                    appendLog("❌ SET_TIME 失败: " + response.error);
+                    resetFlow();
+                }
+                break;
+
+            case WAITING_AUTH:
+                if (response.success && response.cmd == BleLockSdk.CMD_AUTH_PASSWD) {
+                    Byte authResult = response.getAuthPasswdResult();
+                    if (authResult != null && authResult == BleLockSdk.RESULT_SUCCESS) {
+                        appendLog("✅ 密码验证成功");
+                        // 进入步骤 3
+                        currentStep = FlowStep.WAITING_SET_PASSWD;
+                        new Handler(Looper.getMainLooper()).postDelayed(this::sendSetPasswdForFlow, 200);
+                    } else {
+                        appendLog("❌ 密码验证失败（旧密码不正确？）");
+                        appendLog("💡 确认默认密码是否为 000000");
+                        resetFlow();
+                    }
+                } else {
+                    appendLog("❌ AUTH 响应异常: " + response.error);
+                    resetFlow();
+                }
+                break;
+
+            case WAITING_SET_PASSWD:
+                if (response.success && response.cmd == BleLockSdk.CMD_SET_AUTH_PASSWD) {
+                    Byte setResult = response.getSetAuthPasswdResult();
+                    if (setResult != null && setResult == BleLockSdk.RESULT_SUCCESS) {
+                        appendLog("========================================");
+                        appendLog("🎉🎉🎉 密码修改成功！");
+                        appendLog("   新密码: " + pendingNewPassword);
+                        appendLog("💡 下次连接使用新密码");
+                        appendLog("========================================");
+                        textStatus.setText("密码修改成功！新密码: " + pendingNewPassword);
+                        Toast.makeText(MainActivity.this,
+                                "密码修改成功！新密码: " + pendingNewPassword,
+                                Toast.LENGTH_LONG).show();
+                    } else {
+                        appendLog("❌ 密码修改失败");
+                        appendLog("💡 固件可能未启用密码修改功能");
+                        textStatus.setText("密码修改失败");
+                    }
+                } else {
+                    appendLog("❌ SET_PASSWD 响应异常: " + response.error);
+                }
+                resetFlow();
+                break;
+        }
     }
+
+    private void resetFlow() {
+        currentStep = FlowStep.IDLE;
+        pendingNewPassword = null;
+        runOnUiThread(() -> btnChangePassword.setEnabled(isConnected));
+    }
+
+    // ===================== 日志对话框 =====================
+
+    private void showLogDialog() {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("完整日志");
+        View dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_log, null);
+        builder.setView(dialogView);
+
+        TextView logTextView = dialogView.findViewById(R.id.logTextView);
+        Button btnCopy = dialogView.findViewById(R.id.btnCopy);
+        Button btnClear = dialogView.findViewById(R.id.btnClear);
+        Button btnClose = dialogView.findViewById(R.id.btnClose);
+
+        logTextView.setText(logBuffer.toString());
+        logTextView.setMovementMethod(new ScrollingMovementMethod());
+
+        AlertDialog dialog = builder.create();
+        dialog.show();
+
+        btnCopy.setOnClickListener(v -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            clipboard.setPrimaryClip(ClipData.newPlainText("日志", logBuffer.toString()));
+            Toast.makeText(this, "日志已复制", Toast.LENGTH_SHORT).show();
+        });
+        btnClear.setOnClickListener(v -> {
+            logBuffer.setLength(0);
+            textLog.setText("");
+            logTextView.setText("");
+        });
+        btnClose.setOnClickListener(v -> dialog.dismiss());
+    }
+
+    // ===================== 重置 =====================
 
     private void resetState() {
         isConnected = false;
         selectedDevice = null;
         selectedDevicePosition = -1;
+        currentStep = FlowStep.IDLE;
+        pendingNewPassword = null;
         editNewPassword.setText("");
         devicesList.clear();
         devicesMap.clear();
         devicesAdapter.clear();
-        
+        bluetoothManager.disconnect();
+
         updateUIState();
-        textStatus.setText("状态已重置");
+        textStatus.setText("已重置");
         appendLog("========================================");
         appendLog("🔄 状态已重置");
         appendLog("========================================");
-        Toast.makeText(this, "状态已重置", Toast.LENGTH_SHORT).show();
     }
+
+    // ===================== UI 状态 =====================
 
     private void updateUIState() {
         btnScan.setEnabled(!isConnected);
@@ -710,13 +655,12 @@ public class MainActivity extends AppCompatActivity {
         btnTestSend.setEnabled(isConnected);
         btnReset.setEnabled(true);
         btnViewLog.setEnabled(true);
-        
         editNewPassword.setEnabled(isConnected);
     }
 
+    // ===================== 日志输出 =====================
+
     private void appendLog(final String message) {
-        // 确保所有 UI 操作和 logBuffer 写入都在主线程，避免从 BLE 回调线程修改
-        // 导致 CalledFromWrongThreadException 或并发问题
         if (Looper.myLooper() != Looper.getMainLooper()) {
             runOnUiThread(() -> appendLog(message));
             return;
@@ -727,14 +671,10 @@ public class MainActivity extends AppCompatActivity {
         String logMessage = "[" + timestamp + "] " + message;
 
         logBuffer.append(logMessage).append("\n");
-
-        // 限制日志缓存大小（保留最近 1000 行）
         if (logBuffer.length() > 50000) {
-            // 移除前 5000 个字符
             logBuffer.delete(0, 5000);
         }
 
-        // 更新界面显示（只显示最近 100 行）
         String[] lines = logBuffer.toString().split("\n");
         StringBuilder recentLogs = new StringBuilder();
         int start = Math.max(0, lines.length - 100);
@@ -742,39 +682,6 @@ public class MainActivity extends AppCompatActivity {
             recentLogs.append(lines[i]).append("\n");
         }
         textLog.setText(recentLogs.toString());
-
-        // 自动滚动到底部
         scrollView.post(() -> scrollView.fullScroll(ScrollView.FOCUS_DOWN));
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-
-        boolean allGranted = grantResults.length > 0;
-        for (int result : grantResults) {
-            if (result != PackageManager.PERMISSION_GRANTED) {
-                allGranted = false;
-                break;
-            }
-        }
-
-        if (requestCode == REQUEST_LOCATION_PERMISSION) {
-            if (allGranted) {
-                appendLog("✓ 位置权限已授予");
-                startScan();
-            } else {
-                appendLog("❌ 位置权限被拒绝");
-                Toast.makeText(this, "需要位置权限才能扫描蓝牙设备", Toast.LENGTH_LONG).show();
-            }
-        } else if (requestCode == REQUEST_BLUETOOTH_PERMISSIONS) {
-            if (allGranted) {
-                appendLog("✓ 蓝牙权限已授予");
-                startScan();
-            } else {
-                appendLog("❌ 蓝牙权限被拒绝");
-                Toast.makeText(this, "需要蓝牙扫描和连接权限", Toast.LENGTH_LONG).show();
-            }
-        }
     }
 }

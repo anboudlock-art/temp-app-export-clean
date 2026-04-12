@@ -6,400 +6,249 @@ import java.util.Calendar;
 import java.util.Date;
 
 /**
- * 蓝牙锁 SDK - 最终修复版本（基于SYD8811_FINAL_REAL_FIX.bin固件分析）
- * 
- * 固件功能确认：
- * - 支持0x21密码修改命令（REAL_0x21_FUNCTION）
- * - 密码编码：ASCII字符编码
- * - 校验和算法：累加+异或双重校验 checksum = XOR(all bytes) + SUM(all bytes)
- * - 两步验证：先0x20验证旧密码 → 再0x21修改新密码
- * - 默认密码：000000
- * 
+ * 蓝牙锁 SDK —— 基于 4G-BLE-093 固件源码 + Kotlin SDK 逆向工程
+ *
  * 协议格式：
- * - 命令：55 01 CMD [DATA...] CS（固定10字节）
- * - 响应：AA 01 CMD ST CS（固定5字节）
+ * - 请求：55 [cmdId] [CMD] [payload...] [CS]（变长，最后一字节是 BCC 校验和）
+ * - 响应：AA [cmdId] [CMD] [payload...] [CS]（变长，最后一字节是 BCC 校验和）
+ * - 所有通信都经过 AES-128-ECB 加密（见 ProtoUtil）
+ *
+ * 密码编码：每位数字独立一字节（0-9），不是 ASCII
+ * 例如：密码 123456 → {0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
  */
 public class BleLockSdk {
     private static final String TAG = "BleLockSdk";
 
-    // 协议常量
-    private static final byte REQUEST_HEAD = 0x55;  // 命令起始字节
-    private static final byte RESPONSE_HEAD = (byte) 0xAA;  // 响应起始字节
-    private static final byte DATA_TYPE = 0x01;  // 数据类型（固定）
-
     // 指令定义
-    public static final byte CMD_SET_TIME = 0x10;           // 时间设置
-    public static final byte CMD_AUTH_PASSWD = 0x20;        // 密码验证
-    public static final byte CMD_SET_AUTH_PASSWD = 0x21;    // 密码设置
-    public static final byte CMD_OPEN_LOCK = 0x30;          // 开锁
-    public static final byte CMD_CLOSE_LOCK = 0x31;         // 关锁
-    public static final byte CMD_GET_STATUS = 0x40;         // 状态查询
-    public static final byte CMD_FORCE_SLEEP = 0x50;        // 强制休眠
+    public static final byte CMD_SET_TIME = 0x10;
+    public static final byte CMD_AUTH_PASSWD = 0x20;
+    public static final byte CMD_SET_AUTH_PASSWD = 0x21;
+    public static final byte CMD_OPEN_LOCK = 0x30;
+    public static final byte CMD_CLOSE_LOCK = 0x31;
+    public static final byte CMD_GET_STATUS = 0x40;
+    public static final byte CMD_FORCE_SLEEP = 0x50;
 
     // 结果定义
-    public static final byte RESULT_SUCCESS = 0x00;         // 成功
-    public static final byte RESULT_FAILURE = 0x01;         // 失败
-    public static final byte STATUS_CLOSED = 0x00;          // 上锁/关闭
-    public static final byte STATUS_OPENED = 0x01;          // 未上锁/打开
+    public static final byte RESULT_SUCCESS = 0x00;
+    public static final byte RESULT_FAILURE = 0x01;
 
-    // ===================== 校验和计算（基于固件分析）=====================
+    // 递增的命令 ID
+    private static byte cmdId = 0x01;
 
-    /**
-     * 计算校验和 - 累加+异或双重校验（SYD8811固件确认算法）
-     * 公式：checksum = XOR(all bytes) + SUM(all bytes)
-     */
-    public static byte calculateChecksum(byte[] data, int length) {
-        if (data == null || data.length == 0) return 0;
-
-        int sum = 0;
-        byte xor_val = 0;
-        
-        for (int i = 0; i < length && i < data.length; i++) {
-            sum += data[i] & 0xFF;  // 使用 & 0xFF 确保无符号累加
-            xor_val ^= data[i];
-        }
-        
-        // 双重校验：累加和异或相加
-        int checksum = (xor_val & 0xFF) + (sum & 0xFF);
-        return (byte) (checksum & 0xFF);  // 取低8位
+    private static byte nextCmdId() {
+        return ++cmdId;
     }
 
-    // ===================== 密码编码（基于固件分析）=====================
+    // ===================== 请求生成 =====================
 
     /**
-     * 编码密码字符串为字节数组 - ASCII编码（固件确认）
-     * @param password 6位数字字符串
-     * @return 6字节数组（ASCII编码）
-     */
-    private static byte[] encodePassword(String password) {
-        if (password == null || password.length() != 6) {
-            throw new IllegalArgumentException("密码必须是6位");
-        }
-
-        byte[] result = new byte[6];
-        
-        // ASCII编码：每个字节是字符的 ASCII 值
-        // 例如：'1' -> 0x31, '2' -> 0x32, '0' -> 0x30
-        for (int i = 0; i < 6; i++) {
-            result[i] = (byte) password.charAt(i);
-        }
-        
-        log("密码编码（ASCII）: " + password + " -> " + HexStringUtils.bytesToHexString(result));
-        return result;
-    }
-
-    // ===================== Request =====================
-
-    /**
-     * 生成时间设置请求
+     * 生成时间设置请求（0x10 命令）
+     * 格式：55 [cmdId] 10 [年] [月] [日] [时] [分] [秒] [CS]（10 字节）
+     *
+     * 连接后必须先发这个命令，固件收到后会设置 GetConnectTimeSuccess=true，
+     * 并且后续通信从 key1 切换到 key2。
      */
     public static byte[] setTimeRequest(Date time) {
         Calendar c = Calendar.getInstance();
         c.setTime(time);
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_SET_TIME;
-        request[3] = (byte) (c.get(Calendar.YEAR) - 2000);
-        request[4] = (byte) (c.get(Calendar.MONTH) + 1);
-        request[5] = (byte) c.get(Calendar.DAY_OF_MONTH);
-        request[6] = (byte) c.get(Calendar.HOUR_OF_DAY);
-        request[7] = (byte) c.get(Calendar.MINUTE);
-        request[8] = 0x00;  // 填充
-        request[9] = calculateChecksum(request, 9);
-        return request;
+        return new byte[]{
+                ProtoUtil.REQUEST_HEAD,
+                nextCmdId(),
+                CMD_SET_TIME,
+                (byte) (c.get(Calendar.YEAR) - 2000),
+                (byte) (c.get(Calendar.MONTH) + 1),
+                (byte) c.get(Calendar.DAY_OF_MONTH),
+                (byte) c.get(Calendar.HOUR_OF_DAY),
+                (byte) c.get(Calendar.MINUTE),
+                (byte) c.get(Calendar.SECOND),
+                0x00  // 校验和占位，发送前由 ProtoUtil.encryptRequest 填入
+        };
     }
 
     /**
-     * 生成密码验证请求（0x20命令）
-     * 命令格式：55 01 20 [密码6字节 ASCII] CS（固定10字节）
+     * 生成密码验证请求（0x20 命令）
+     * 格式：55 [cmdId] 20 [P0] [P1] [P2] [P3] [P4] [P5] [CS]（10 字节）
      *
-     * 字节布局：
-     *   [0] 0x55 帧头
-     *   [1] 0x01 数据类型
-     *   [2] 0x20 命令码
-     *   [3..8] 6 字节 ASCII 密码
-     *   [9] 校验和
-     *
-     * 注意：6 字节密码完整占用 [3..8]，中间没有填充字节。
-     */
-    public static byte[] authPasswdRequest(String password) {
-        if (password == null || password.length() != 6) {
-            throw new IllegalArgumentException("密码必须是6位");
-        }
-
-        byte[] request = new byte[10];
-
-        // 帧头
-        request[0] = REQUEST_HEAD;          // 0x55
-
-        // 数据类型
-        request[1] = DATA_TYPE;             // 0x01
-
-        // 命令码
-        request[2] = CMD_AUTH_PASSWD;       // 0x20
-
-        // 密码编码（ASCII 编码，6 字节放在 [3..8]）
-        byte[] encodedPassword = encodePassword(password);
-        System.arraycopy(encodedPassword, 0, request, 3, 6);
-
-        // 校验和（累加+异或双重校验，基于前 9 字节）
-        request[9] = calculateChecksum(request, 9);
-
-        log("生成验证密码请求: " + HexStringUtils.bytesToHexString(request));
-        log("  帧头: 0x" + String.format("%02X", request[0]));
-        log("  类型: 0x" + String.format("%02X", request[1]));
-        log("  命令: 0x" + String.format("%02X", request[2]));
-        log("  密码(ASCII): " + HexStringUtils.bytesToHexString(request, 3, 6));
-        log("  校验和: 0x" + String.format("%02X", request[9]));
-
-        return request;
-    }
-
-    /**
-     * 生成密码验证请求（整数版本，兼容旧接口）
+     * 密码编码：每位数字 0-9 独立一字节（不是 ASCII！）
      */
     public static byte[] authPasswdRequest(int passwd) {
         if (passwd < 0 || passwd > 999999) {
             throw new IllegalArgumentException("密码范围错误 (0-999999)");
         }
-        // 转换为6位字符串，带前导零
-        String passwordStr = String.format("%06d", passwd);
-        return authPasswdRequest(passwordStr);
+        return new byte[]{
+                ProtoUtil.REQUEST_HEAD,
+                nextCmdId(),
+                CMD_AUTH_PASSWD,
+                (byte) (passwd / 100000 % 10),
+                (byte) (passwd / 10000 % 10),
+                (byte) (passwd / 1000 % 10),
+                (byte) (passwd / 100 % 10),
+                (byte) (passwd / 10 % 10),
+                (byte) (passwd % 10),
+                0x00  // 校验和占位
+        };
     }
 
     /**
-     * 生成密码设置请求（0x21命令）
-     * 命令格式：55 01 21 [密码6字节 ASCII] CS（固定10字节）
-     *
-     * 字节布局：
-     *   [0] 0x55 帧头
-     *   [1] 0x01 数据类型
-     *   [2] 0x21 命令码
-     *   [3..8] 6 字节 ASCII 新密码
-     *   [9] 校验和
-     *
-     * 与 0x20 验证命令结构完全一致，只是命令码不同。
-     */
-    public static byte[] setAuthPasswdRequest(String password) {
-        if (password == null || password.length() != 6) {
-            throw new IllegalArgumentException("密码必须是6位");
-        }
-
-        byte[] request = new byte[10];
-
-        // 帧头
-        request[0] = REQUEST_HEAD;          // 0x55
-
-        // 数据类型
-        request[1] = DATA_TYPE;             // 0x01
-
-        // 命令码
-        request[2] = CMD_SET_AUTH_PASSWD;   // 0x21
-
-        // 密码编码（ASCII 编码，6 字节完整放在 [3..8]）
-        byte[] encodedPassword = encodePassword(password);
-        System.arraycopy(encodedPassword, 0, request, 3, 6);
-
-        // 校验和（累加+异或双重校验，基于前 9 字节）
-        request[9] = calculateChecksum(request, 9);
-
-        log("生成修改密码请求: " + HexStringUtils.bytesToHexString(request));
-        log("  帧头: 0x" + String.format("%02X", request[0]));
-        log("  类型: 0x" + String.format("%02X", request[1]));
-        log("  命令: 0x" + String.format("%02X", request[2]));
-        log("  新密码(ASCII): " + HexStringUtils.bytesToHexString(request, 3, 6));
-        log("  校验和: 0x" + String.format("%02X", request[9]));
-
-        return request;
-    }
-
-    /**
-     * 生成密码设置请求（整数版本，兼容旧接口）
+     * 生成密码设置请求（0x21 命令）
+     * 格式：55 [cmdId] 21 [P0] [P1] [P2] [P3] [P4] [P5] [CS]（10 字节）
      */
     public static byte[] setAuthPasswdRequest(int passwd) {
         if (passwd < 0 || passwd > 999999) {
             throw new IllegalArgumentException("密码范围错误 (0-999999)");
         }
-        // 转换为6位字符串，带前导零
-        String passwordStr = String.format("%06d", passwd);
-        return setAuthPasswdRequest(passwordStr);
+        return new byte[]{
+                ProtoUtil.REQUEST_HEAD,
+                nextCmdId(),
+                CMD_SET_AUTH_PASSWD,
+                (byte) (passwd / 100000 % 10),
+                (byte) (passwd / 10000 % 10),
+                (byte) (passwd / 1000 % 10),
+                (byte) (passwd / 100 % 10),
+                (byte) (passwd / 10 % 10),
+                (byte) (passwd % 10),
+                0x00  // 校验和占位
+        };
     }
 
     /**
-     * 生成开锁请求
+     * 生成开锁请求（0x30 命令）
+     * 格式：55 [cmdId] 30 [sleepMode] [CS]（5 字节）
      */
     public static byte[] openLockRequest(byte sleepMode) {
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_OPEN_LOCK;
-        request[3] = sleepMode;
-        request[9] = calculateChecksum(request, 9);
-        return request;
+        return new byte[]{
+                ProtoUtil.REQUEST_HEAD,
+                nextCmdId(),
+                CMD_OPEN_LOCK,
+                sleepMode,
+                0x00
+        };
     }
 
     /**
-     * 生成关锁请求
+     * 生成关锁请求（0x31 命令）
      */
     public static byte[] closeLockRequest(byte sleepMode) {
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_CLOSE_LOCK;
-        request[3] = sleepMode;
-        request[9] = calculateChecksum(request, 9);
-        return request;
+        return new byte[]{
+                ProtoUtil.REQUEST_HEAD,
+                nextCmdId(),
+                CMD_CLOSE_LOCK,
+                sleepMode,
+                0x00
+        };
     }
 
     /**
-     * 生成状态查询请求
+     * 生成状态查询请求（0x40 命令）
      */
     public static byte[] getStatusRequest(byte sleepMode) {
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_GET_STATUS;
-        request[3] = sleepMode;
-        request[9] = calculateChecksum(request, 9);
-        return request;
+        return new byte[]{
+                ProtoUtil.REQUEST_HEAD,
+                nextCmdId(),
+                CMD_GET_STATUS,
+                sleepMode,
+                0x00
+        };
     }
 
     /**
-     * 生成强制休眠请求
+     * 生成强制休眠请求（0x50 命令）
      */
     public static byte[] forceSleepRequest() {
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_FORCE_SLEEP;
-        request[9] = calculateChecksum(request, 9);
-        return request;
+        return new byte[]{
+                ProtoUtil.REQUEST_HEAD,
+                nextCmdId(),
+                CMD_FORCE_SLEEP,
+                0x00
+        };
     }
 
-    // ===================== Response =====================
+    // ===================== 响应解析 =====================
 
     /**
-     * 解析响应（SYD8811协议）
-     * 响应格式：AA 01 CMD ST CS（固定5字节）
+     * 解析解密后的响应数据
+     *
+     * @param data 解密后的有效数据（已去掉 0xFB 帧头和 0xFC 填充）
+     * @return Response 对象
      */
-    public static Response parseResponse(byte[] responseData) {
-        log("================== 解析响应 ==================");
-
-        // 先做 null 检查，避免后续访问崩溃
-        if (responseData == null) {
-            log("错误: 响应数据为空 (null)");
-            return new Response(false, "响应数据为空", null, (byte) 0, (byte) 0);
+    public static Response parseResponse(byte[] data) {
+        if (data == null || data.length < 4) {
+            Log.e(TAG, "响应数据不足: " + (data != null ? data.length : "null"));
+            return new Response(false, "响应数据长度不足");
         }
 
-        log("响应数据: " + HexStringUtils.bytesToHexString(responseData));
-        log("数据长度: " + responseData.length + " 字节");
-
-        // 检查数据长度（至少需要5字节：帧头+类型+命令+状态+校验和）
-        if (responseData.length < 5) {
-            log("错误: 响应数据长度不足，至少需要 5 字节，实际: " + responseData.length);
-            return new Response(false, "响应数据长度不足", null, (byte) 0, (byte) 0);
+        if (data[0] != ProtoUtil.RESPONSE_HEAD) {
+            Log.e(TAG, "响应帧头错误: 0x" + String.format("%02X", data[0] & 0xFF));
+            return new Response(false, "响应帧头错误");
         }
 
-        // 检查帧头
-        log("响应帧头: 0x" + String.format("%02X", responseData[0]));
-        if (responseData[0] != RESPONSE_HEAD) {
-            log("错误: 响应帧头错误，期望: 0xAA，实际: 0x" + String.format("%02X", responseData[0]));
-            return new Response(false, "响应帧头错误", null, (byte) 0, (byte) 0);
+        // 校验和验证
+        if (!ProtoUtil.verifyCheckCode(data)) {
+            Log.e(TAG, "校验和错误");
+            return new Response(false, "校验和错误");
         }
 
-        // 检查类型字段
-        log("类型字段: 0x" + String.format("%02X", responseData[1]));
-        if (responseData[1] != DATA_TYPE) {
-            log("警告: 类型字段不是 0x01，实际: 0x" + String.format("%02X", responseData[1]));
+        byte responseCmdId = data[1];
+        byte cmd = data[2];
+
+        // payload 是 data[3..n-2]（去掉 header, cmdId, cmd, 和最后的 checksum）
+        int payloadLen = data.length - 4;
+        byte[] payload = new byte[Math.max(payloadLen, 0)];
+        if (payloadLen > 0) {
+            System.arraycopy(data, 3, payload, 0, payloadLen);
         }
 
-        byte cmd = responseData[2];
-        byte status = responseData[3];
-        byte checksum = responseData[4];
+        Log.d(TAG, "响应解析: cmdId=" + (responseCmdId & 0xFF) +
+                ", cmd=0x" + String.format("%02X", cmd & 0xFF) +
+                ", payload=" + HexStringUtils.bytesToHexString(payload));
 
-        // 计算校验和（累加+异或双重校验）
-        int sum = (responseData[0] & 0xFF) + (responseData[1] & 0xFF) + 
-                  (responseData[2] & 0xFF) + (responseData[3] & 0xFF);
-        byte xor_val = (byte) (responseData[0] ^ responseData[1] ^ 
-                             responseData[2] ^ responseData[3]);
-        int calculatedChecksum = (xor_val & 0xFF) + (sum & 0xFF);
-        
-        log("计算校验和（累加）: 0x" + String.format("%02X", sum & 0xFF));
-        log("计算校验和（异或）: 0x" + String.format("%02X", xor_val & 0xFF));
-        log("计算校验和（双重）: 0x" + String.format("%02X", calculatedChecksum & 0xFF));
-        log("实际校验和: 0x" + String.format("%02X", checksum));
-
-        boolean checksumValid = (calculatedChecksum & 0xFF) == (checksum & 0xFF);
-        
-        if (!checksumValid) {
-            log("警告: 响应校验和不匹配");
-        } else {
-            log("校验和验证通过");
-        }
-
-        log("命令: 0x" + String.format("%02X", cmd));
-        log("状态: 0x" + String.format("%02X", status));
-        log("==============================================");
-
-        return new Response(checksumValid, checksumValid ? "" : "校验和错误", responseData, cmd, status);
+        return new Response(true, "", data, responseCmdId, cmd, payload);
     }
 
     /**
      * 响应数据类
      */
     public static class Response {
-        public boolean success;
-        public String error;
-        public byte[] data;
-        public byte cmd;
-        public byte status;
+        public final boolean success;
+        public final String error;
+        public final byte[] data;
+        public final byte cmdId;
+        public final byte cmd;
+        public final byte[] payload;
 
-        public Response(boolean success, String error, byte[] data, byte cmd, byte status) {
+        public Response(boolean success, String error) {
+            this(success, error, new byte[0], (byte) 0, (byte) 0, new byte[0]);
+        }
+
+        public Response(boolean success, String error, byte[] data,
+                        byte cmdId, byte cmd, byte[] payload) {
             this.success = success;
             this.error = error;
             this.data = data;
+            this.cmdId = cmdId;
             this.cmd = cmd;
-            this.status = status;
+            this.payload = payload;
         }
 
+        /** 获取密码验证结果 */
         public Byte getAuthPasswdResult() {
-            if (cmd == CMD_AUTH_PASSWD) {
-                return status == RESULT_SUCCESS ? RESULT_SUCCESS : RESULT_FAILURE;
+            if (cmd == CMD_AUTH_PASSWD && payload.length >= 1) {
+                return payload[0] == 0x00 ? RESULT_SUCCESS : RESULT_FAILURE;
             }
             return null;
         }
 
+        /** 获取密码设置结果 */
         public Byte getSetAuthPasswdResult() {
-            if (cmd == CMD_SET_AUTH_PASSWD) {
-                return status == RESULT_SUCCESS ? RESULT_SUCCESS : RESULT_FAILURE;
+            if (cmd == CMD_SET_AUTH_PASSWD && payload.length >= 1) {
+                return payload[0] == 0x00 ? RESULT_SUCCESS : RESULT_FAILURE;
             }
             return null;
         }
 
-        public Byte getStatusResult() {
-            if (cmd == CMD_GET_STATUS) {
-                return status;
-            }
-            return null;
+        /** 获取时间设置结果 */
+        public boolean isSetTimeSuccess() {
+            return cmd == CMD_SET_TIME && success;
         }
-
-        public Byte getOpenLockResult() {
-            if (cmd == CMD_OPEN_LOCK) {
-                return status;
-            }
-            return null;
-        }
-
-        public Byte getCloseLockResult() {
-            if (cmd == CMD_CLOSE_LOCK) {
-                return status;
-            }
-            return null;
-        }
-    }
-
-    private static void log(String message) {
-        Log.d(TAG, message);
     }
 }
