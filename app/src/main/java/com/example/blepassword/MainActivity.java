@@ -293,8 +293,8 @@ public class MainActivity extends AppCompatActivity {
                     appendLog("✅ 连接成功！");
                     appendLog("   Key1: " + HexStringUtils.bytesToHexString(bluetoothManager.getAesKey1()));
                     appendLog("   Key2: " + HexStringUtils.bytesToHexString(bluetoothManager.getAesKey2()));
-                    appendLog("💡 点击"测试发送"发送 SET_TIME");
-                    appendLog("💡 或直接点"修改密码"");
+                    appendLog("💡 点击[测试发送]发送 SET_TIME");
+                    appendLog("💡 或直接点[修改密码]");
                     appendLog("========================================");
 
                     Toast.makeText(MainActivity.this, "连接成功", Toast.LENGTH_SHORT).show();
