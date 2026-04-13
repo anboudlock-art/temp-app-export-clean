@@ -206,10 +206,10 @@ public class ProtoUtil {
         byte[] macBytes = parseMacAddress(macAddress);
         byte[] key1 = new byte[16];
 
-        // MAC 地址倒序放入 key1[0..5]
-        for (int i = 0; i < 6; i++) {
-            key1[i] = macBytes[5 - i];
-        }
+        // Android 的 MAC 已经是 MSB 顺序 (D1:2A:E2:02:6A:00 → [D1,2A,E2,02,6A,00])
+        // 固件用 addr[5-i] 是因为 BLE 地址是 LSB 存储，反转后得到 MSB
+        // 这里 Android 已经是 MSB，直接复制即可（不要再反转！）
+        System.arraycopy(macBytes, 0, key1, 0, 6);
 
         // key1[6] = 0x11, key1[7] = 0x22, ..., key1[15] = 0xAA
         key1[6] = 0x11;
