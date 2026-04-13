@@ -181,12 +181,9 @@ public class BluetoothConnectionManager {
                 .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build();
 
-        // 使用和老版本一样的 setDeviceName("LOCK_") 过滤器
-        // （Vivo/MIUI 上无过滤器可能导致 error 2）
+        // 不设过滤器，扫描所有设备（权限已修好，不会再报 error 2）
+        // 在回调里用 startsWith("LOCK_") 做前缀过滤
         List<android.bluetooth.le.ScanFilter> filters = new ArrayList<>();
-        filters.add(new android.bluetooth.le.ScanFilter.Builder()
-                .setDeviceName("LOCK_")
-                .build());
 
         leScanCallback = new android.bluetooth.le.ScanCallback() {
             @Override
