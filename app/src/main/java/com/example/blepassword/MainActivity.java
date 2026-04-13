@@ -82,6 +82,7 @@ public class MainActivity extends AppCompatActivity {
     }
     private FlowStep currentStep = FlowStep.IDLE;
     private String pendingNewPassword;  // 暂存用户输入的新密码
+    private Date setTimeDate;  // SET_TIME 发送时的精确时间（用于生成 key2）
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -292,7 +293,7 @@ public class MainActivity extends AppCompatActivity {
 
                     appendLog("✅ 连接成功！");
                     appendLog("   Key1: " + HexStringUtils.bytesToHexString(bluetoothManager.getAesKey1()));
-                    appendLog("   Key2: " + HexStringUtils.bytesToHexString(bluetoothManager.getAesKey2()));
+                    appendLog("   Key2 将在 SET_TIME 成功后生成");
                     appendLog("💡 点击[测试发送]发送 SET_TIME");
                     appendLog("💡 或直接点[修改密码]");
                     appendLog("========================================");
@@ -353,10 +354,9 @@ public class MainActivity extends AppCompatActivity {
                     BleLockSdk.Response response = BleLockSdk.parseResponse(decrypted);
                     runOnUiThread(() -> {
                         if (response.success && response.isSetTimeSuccess()) {
-                            bluetoothManager.setTimeSetSuccess(true);
-                            // 更新 key2 为当前时间
-                            bluetoothManager.getAesKey2();  // key2 已在 connect 时生成
-                            appendLog("✅ SET_TIME 成功！已切换到 key2");
+                            bluetoothManager.onSetTimeSuccess(now);
+                            appendLog("✅ SET_TIME 成功！key2 已生成");
+                            appendLog("   Key2: " + HexStringUtils.bytesToHexString(bluetoothManager.getAesKey2()));
                             textStatus.setText("SET_TIME 成功");
                         } else {
                             appendLog("❌ SET_TIME 响应异常: " +
@@ -433,8 +433,8 @@ public class MainActivity extends AppCompatActivity {
         appendLog("📤 步骤 1/3: 发送 SET_TIME (0x10)");
         textStatus.setText("步骤 1/3: 设置时间...");
 
-        Date now = new Date();
-        byte[] request = BleLockSdk.setTimeRequest(now);
+        setTimeDate = new Date();  // 保存精确时间，后面生成 key2 用
+        byte[] request = BleLockSdk.setTimeRequest(setTimeDate);
         byte[] key = bluetoothManager.getAesKey1();  // SET_TIME 用 key1
 
         appendLog("   明文: " + HexStringUtils.bytesToHexString(request));
@@ -530,8 +530,9 @@ public class MainActivity extends AppCompatActivity {
         switch (currentStep) {
             case WAITING_SET_TIME:
                 if (response.success && response.isSetTimeSuccess()) {
-                    appendLog("✅ SET_TIME 成功，切换到 key2");
-                    bluetoothManager.setTimeSetSuccess(true);
+                    appendLog("✅ SET_TIME 成功，用发送时的时间生成 key2");
+                    bluetoothManager.onSetTimeSuccess(setTimeDate);
+                    appendLog("   Key2: " + HexStringUtils.bytesToHexString(bluetoothManager.getAesKey2()));
                     // 进入步骤 2
                     currentStep = FlowStep.WAITING_AUTH;
                     // 短暂延迟确保固件切换密钥

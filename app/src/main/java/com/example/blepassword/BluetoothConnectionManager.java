@@ -136,7 +136,16 @@ public class BluetoothConnectionManager {
      * 未发送 SET_TIME 前用 key1，发送后用 key2
      */
     public byte[] getCurrentKey() {
-        return timeSetSuccess ? aesKey2 : aesKey1;
+        return (timeSetSuccess && aesKey2 != null) ? aesKey2 : aesKey1;
+    }
+
+    /**
+     * SET_TIME 成功后调用：用发送时的精确时间生成 key2
+     */
+    public void onSetTimeSuccess(Date setTimeDate) {
+        this.aesKey2 = ProtoUtil.generateKey2(aesKey1, setTimeDate);
+        this.timeSetSuccess = true;
+        Log.d(TAG, "Key2 已更新: " + HexStringUtils.bytesToHexString(aesKey2));
     }
 
     public void setTimeSetSuccess(boolean success) {
@@ -263,10 +272,10 @@ public class BluetoothConnectionManager {
 
         // 生成 AES 密钥
         aesKey1 = ProtoUtil.generateKey1(mac);
-        aesKey2 = ProtoUtil.generateKey2(aesKey1, new Date());
+        // key2 不在这里生成！等 SET_TIME 发送时再生成，确保时间完全一致
+        aesKey2 = null;
 
         Log.d(TAG, "Key1: " + HexStringUtils.bytesToHexString(aesKey1));
-        Log.d(TAG, "Key2: " + HexStringUtils.bytesToHexString(aesKey2));
 
         // 连接超时
         connectionTimeoutHandler.postDelayed(() -> {
