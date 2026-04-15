@@ -1,0 +1,124 @@
+From 3b570f7acfc894c65978244abc6d1c56afd3bc27 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 11 Apr 2026 05:47:49 +0000
+Subject: [PATCH] patch-4
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ app/src/main/AndroidManifest.xml              | 22 +++++---------
+ .../BluetoothConnectionManager.java           | 13 +++++++--
+ .../com/example/blepassword/MainActivity.java | 29 +++++++++----------
+ 3 files changed, 32 insertions(+), 32 deletions(-)
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 06fb8af..5778eed 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -3,22 +3,16 @@
+     xmlns:tools="http://schemas.android.com/tools">
+ 
+     <!-- 蓝牙权限 -->
+-    <uses-permission android:name="android.permission.BLUETOOTH"
+-        android:maxSdkVersion="30" />
+-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+-        android:maxSdkVersion="30" />
+-    <!-- Android 12+ 蓝牙权限。neverForLocation 表示我们不用 BLE 扫描做位置推断，
+-         这样就不再强制要求 ACCESS_FINE_LOCATION 作为前置条件。 -->
+-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+-        android:usesPermissionFlags="neverForLocation"
+-        tools:targetApi="s" />
++    <uses-permission android:name="android.permission.BLUETOOTH" />
++    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
++    <!-- Android 12+ 蓝牙权限。注意：不加 neverForLocation 标志，
++         MIUI 某些版本对此标志处理异常，会导致 BLE 扫描注册失败 (error 2)。 -->
++    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+ 
+-    <!-- 位置权限：仅 Android 11 及以下 BLE 扫描需要 -->
+-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+-        android:maxSdkVersion="30" />
+-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
+-        android:maxSdkVersion="30" />
++    <!-- 位置权限：BLE 扫描在 MIUI 上即使到 Android 12+ 仍需要此权限 -->
++    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
++    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+     
+     <!-- 蓝牙功能 -->
+     <uses-feature
+diff --git a/app/src/main/java/com/example/blepassword/BluetoothConnectionManager.java b/app/src/main/java/com/example/blepassword/BluetoothConnectionManager.java
+index 95c831f..7a52c1c 100644
+--- a/app/src/main/java/com/example/blepassword/BluetoothConnectionManager.java
++++ b/app/src/main/java/com/example/blepassword/BluetoothConnectionManager.java
+@@ -259,9 +259,16 @@ public class BluetoothConnectionManager {
+             public void onScanFailed(int errorCode) {
+                 String reason = describeScanError(errorCode);
+                 Log.e(TAG, "扫描失败: " + errorCode + " - " + reason);
+-                if (scanCallback != null) {
+-                    scanCallback.onScanError(errorCode, reason);
+-                    scanCallback.onScanComplete();
++
++                // 清理状态，避免 10 秒 timeout 又触发一次 stopScan → 重复日志
++                isScanning = false;
++                scanTimeoutHandler.removeCallbacksAndMessages(null);
++
++                ScanCallback cb = scanCallback;
++                scanCallback = null;
++                if (cb != null) {
++                    cb.onScanError(errorCode, reason);
++                    cb.onScanComplete();
+                 }
+             }
+         };
+diff --git a/app/src/main/java/com/example/blepassword/MainActivity.java b/app/src/main/java/com/example/blepassword/MainActivity.java
+index 2a9f9fb..6a82853 100644
+--- a/app/src/main/java/com/example/blepassword/MainActivity.java
++++ b/app/src/main/java/com/example/blepassword/MainActivity.java
+@@ -208,9 +208,16 @@ public class MainActivity extends AppCompatActivity {
+     }
+ 
+     private boolean checkPermissions() {
++        List<String> missing = new ArrayList<>();
++
++        // 位置权限（所有 Android 版本都要求 —— MIUI 即使在 Android 12+ 也强制要求）
++        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
++                != PackageManager.PERMISSION_GRANTED) {
++            missing.add(Manifest.permission.ACCESS_FINE_LOCATION);
++        }
++
+         // Android 12 (API 31) 及以上需要动态请求 BLUETOOTH_SCAN / BLUETOOTH_CONNECT
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+-            List<String> missing = new ArrayList<>();
+             if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
+                     != PackageManager.PERMISSION_GRANTED) {
+                 missing.add(Manifest.permission.BLUETOOTH_SCAN);
+@@ -219,20 +226,12 @@ public class MainActivity extends AppCompatActivity {
+                     != PackageManager.PERMISSION_GRANTED) {
+                 missing.add(Manifest.permission.BLUETOOTH_CONNECT);
+             }
+-            if (!missing.isEmpty()) {
+-                appendLog("⚠️  需要蓝牙运行时权限 (Android 12+)");
+-                requestPermissions(missing.toArray(new String[0]), REQUEST_BLUETOOTH_PERMISSIONS);
+-                return false;
+-            }
+-        } else {
+-            // Android 11 及以下：BLE 扫描需要位置权限
+-            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+-                    != PackageManager.PERMISSION_GRANTED) {
+-                appendLog("⚠️  需要位置权限才能扫描蓝牙设备");
+-                requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
+-                        REQUEST_LOCATION_PERMISSION);
+-                return false;
+-            }
++        }
++
++        if (!missing.isEmpty()) {
++            appendLog("⚠️  需要运行时权限: " + missing);
++            requestPermissions(missing.toArray(new String[0]), REQUEST_BLUETOOTH_PERMISSIONS);
++            return false;
+         }
+ 
+         // 检查蓝牙是否开启
+-- 
+2.43.0
