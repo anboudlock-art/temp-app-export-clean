@@ -57,7 +57,7 @@ public class MainActivity extends AppCompatActivity {
     // UI 组件
     private Button btnScan, btnConnect, btnChangePassword, btnReset, btnTestSend, btnViewLog;
     private ListView listViewDevices;
-    private EditText editNewPassword;
+    private EditText editOldPassword, editNewPassword;
     private TextView textStatus, textLog;
     private ScrollView scrollView;
 
@@ -81,6 +81,7 @@ public class MainActivity extends AppCompatActivity {
         WAITING_SET_PASSWD
     }
     private FlowStep currentStep = FlowStep.IDLE;
+    private String pendingOldPassword;  // 暂存用户输入的旧密码
     private String pendingNewPassword;  // 暂存用户输入的新密码
     private Date setTimeDate;  // SET_TIME 发送时的精确时间（用于生成 key2）
 
@@ -101,6 +102,7 @@ public class MainActivity extends AppCompatActivity {
         btnTestSend = findViewById(R.id.btnTestSend);
         btnViewLog = findViewById(R.id.btnViewLog);
         listViewDevices = findViewById(R.id.listViewDevices);
+        editOldPassword = findViewById(R.id.editOldPassword);
         editNewPassword = findViewById(R.id.editNewPassword);
         textStatus = findViewById(R.id.textStatus);
         textLog = findViewById(R.id.textLog);
@@ -408,18 +410,25 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        String newPassword = editNewPassword.getText().toString().trim();
-        if (newPassword.isEmpty() || newPassword.length() != 6 || !newPassword.matches("\\d+")) {
-            Toast.makeText(this, "密码必须是 6 位数字", Toast.LENGTH_SHORT).show();
+        String oldPassword = editOldPassword.getText().toString().trim();
+        if (oldPassword.isEmpty() || oldPassword.length() != 6 || !oldPassword.matches("\\d+")) {
+            Toast.makeText(this, "旧密码必须是 6 位数字", Toast.LENGTH_SHORT).show();
             return;
         }
 
+        String newPassword = editNewPassword.getText().toString().trim();
+        if (newPassword.isEmpty() || newPassword.length() != 6 || !newPassword.matches("\\d+")) {
+            Toast.makeText(this, "新密码必须是 6 位数字", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        pendingOldPassword = oldPassword;
         pendingNewPassword = newPassword;
         btnChangePassword.setEnabled(false);
 
         appendLog("========================================");
         appendLog("🔄 开始密码修改流程");
-        appendLog("   旧密码: 000000（默认）");
+        appendLog("   旧密码: " + oldPassword);
         appendLog("   新密码: " + newPassword);
         appendLog("========================================");
 
@@ -448,10 +457,11 @@ public class MainActivity extends AppCompatActivity {
 
     /** 步骤 2：发送 AUTH_PASSWD (0x20) */
     private void sendAuthForFlow() {
-        appendLog("📤 步骤 2/3: 验证密码 (0x20) 密码=000000");
+        int oldPassInt = Integer.parseInt(pendingOldPassword);
+        appendLog("📤 步骤 2/3: 验证密码 (0x20) 密码=" + pendingOldPassword);
         textStatus.setText("步骤 2/3: 验证密码...");
 
-        byte[] request = BleLockSdk.authPasswdRequest(0);  // 000000
+        byte[] request = BleLockSdk.authPasswdRequest(oldPassInt);
         byte[] key = bluetoothManager.getCurrentKey();  // 已切换到 key2
 
         appendLog("   明文: " + HexStringUtils.bytesToHexString(request));
