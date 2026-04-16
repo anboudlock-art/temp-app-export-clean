@@ -64,6 +64,7 @@ public class MainActivity extends AppCompatActivity {
     private Button btnTestSend;
     private Button btnViewLog;
     private ListView listViewDevices;
+    private EditText editOldPassword;
     private EditText editNewPassword;
     private TextView textStatus;
     private TextView textLog;
@@ -98,6 +99,7 @@ public class MainActivity extends AppCompatActivity {
         btnTestSend = findViewById(R.id.btnTestSend);
         btnViewLog = findViewById(R.id.btnViewLog);
         listViewDevices = findViewById(R.id.listViewDevices);
+        editOldPassword = findViewById(R.id.editOldPassword);
         editNewPassword = findViewById(R.id.editNewPassword);
         textStatus = findViewById(R.id.textStatus);
         textLog = findViewById(R.id.textLog);
@@ -443,7 +445,20 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        String oldPassword = editOldPassword.getText().toString().trim();
         String newPassword = editNewPassword.getText().toString().trim();
+
+        if (oldPassword.isEmpty()) {
+            appendLog("❌ 错误：旧密码为空");
+            Toast.makeText(this, "请输入旧密码", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (oldPassword.length() != 6 || !oldPassword.matches("\\d+")) {
+            appendLog("❌ 错误：旧密码必须是6位数字");
+            Toast.makeText(this, "旧密码必须是 6 位数字", Toast.LENGTH_SHORT).show();
+            return;
+        }
 
         if (newPassword.isEmpty()) {
             appendLog("❌ 错误：新密码为空");
@@ -459,7 +474,7 @@ public class MainActivity extends AppCompatActivity {
 
         appendLog("========================================");
         appendLog("🔄 开始修改密码");
-        appendLog("   原密码: 000000 (默认)");
+        appendLog("   旧密码: " + oldPassword);
         appendLog("   新密码: " + newPassword);
         appendLog("   协议: SYD8811");
         appendLog("   编码: ASCII编码（例如：'1' -> 0x31）");
@@ -471,8 +486,8 @@ public class MainActivity extends AppCompatActivity {
         btnChangePassword.setEnabled(false);
 
         // 步骤1：先验证初始密码（0x20命令）
-        byte[] authData = BleLockSdk.authPasswdRequest("000000");
-        appendLog("📤 步骤1/2: 验证初始密码 000000");
+        byte[] authData = BleLockSdk.authPasswdRequest(oldPassword);
+        appendLog("📤 步骤1/2: 验证密码 " + oldPassword);
         appendLog("   发送: " + HexStringUtils.bytesToHexString(authData));
 
         new Thread(() -> {
