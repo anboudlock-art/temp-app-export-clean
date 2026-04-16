@@ -101,6 +101,18 @@ public class BluetoothConnectionManager {
         this.bluetoothAdapter = bluetoothManager.getAdapter();
     }
 
+    public boolean isBluetoothEnabled() {
+        return bluetoothAdapter != null && bluetoothAdapter.isEnabled();
+    }
+
+    @SuppressLint("MissingPermission")
+    public void enableBluetooth(android.app.Activity activity) {
+        if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
+            android.content.Intent enableBtIntent = new android.content.Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+            activity.startActivityForResult(enableBtIntent, 1);
+        }
+    }
+
     /**
      * 开始扫描蓝牙设备
      */
