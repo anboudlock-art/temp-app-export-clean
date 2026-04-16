@@ -169,12 +169,8 @@ public class BluetoothConnectionManager {
                     .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
                     .build();
             
-            android.bluetooth.le.ScanFilter filter = new android.bluetooth.le.ScanFilter.Builder()
-                    .setDeviceName("LOCK_")
-                    .build();
-            
+            // No filter - check name prefix in callback instead
             List<android.bluetooth.le.ScanFilter> filters = new ArrayList<>();
-            filters.add(filter);
 
             scanner.startScan(filters, settings, new android.bluetooth.le.ScanCallback() {
                 @Override
