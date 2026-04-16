@@ -147,14 +147,8 @@ public class BluetoothConnectionManager {
             }
         }, SCAN_TIMEOUT_MS);
 
-        // 根据Android版本使用不同的扫描API
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            // Android 5.0+ 使用新API
-            startScanLollipop();
-        } else {
-            // Android 4.3-4.4 使用旧API
-            startScanLegacy();
-        }
+        // 使用旧API扫描（兼容性最好）
+        startScanLegacy();
     }
 
     /**
