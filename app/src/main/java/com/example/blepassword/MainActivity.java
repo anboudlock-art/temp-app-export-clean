@@ -80,7 +80,8 @@ public class MainActivity extends AppCompatActivity {
         WAITING_AUTH,
         WAITING_SET_PASSWD,
         WAITING_UNLOCK,
-        WAITING_LOCK
+        WAITING_LOCK,
+        WAITING_BAR_INSERT
     }
     private FlowStep currentStep = FlowStep.IDLE;
     private String pendingOldPassword;
@@ -587,10 +588,16 @@ public class MainActivity extends AppCompatActivity {
                             new Handler(Looper.getMainLooper()).postDelayed(this::sendSetPasswdForFlow, 200);
                         } else if (pendingLockAction != null) {
                             boolean isUnlock = pendingLockAction;
-                            pendingLockAction = null;
-                            FlowStep nextStep = isUnlock ? FlowStep.WAITING_UNLOCK : FlowStep.WAITING_LOCK;
-                            currentStep = nextStep;
-                            new Handler(Looper.getMainLooper()).postDelayed(() -> sendLockForFlow(isUnlock), 200);
+                            if (isUnlock) {
+                                pendingLockAction = null;
+                                currentStep = FlowStep.WAITING_UNLOCK;
+                                new Handler(Looper.getMainLooper()).postDelayed(() -> sendLockForFlow(true), 200);
+                            } else {
+                                // 关锁：等待锁杆插入信号（0x40通知）
+                                currentStep = FlowStep.WAITING_BAR_INSERT;
+                                appendLog("⏳ 等待锁杆插入...");
+                                textStatus.setText("请插入锁杆");
+                            }
                         }
                     } else {
                         appendLog("❌ 密码验证失败（旧密码不正确？）");
@@ -625,6 +632,16 @@ public class MainActivity extends AppCompatActivity {
                     appendLog("❌ SET_PASSWD 响应异常: " + response.error);
                 }
                 resetFlow();
+                break;
+
+            case WAITING_BAR_INSERT:
+                // 收到0x40通知 = 锁杆已插入，自动发送关锁指令
+                if (response.cmd == 0x40) {
+                    appendLog("✅ 锁杆到位信号已收到");
+                    pendingLockAction = null;
+                    currentStep = FlowStep.WAITING_LOCK;
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> sendLockForFlow(false), 200);
+                }
                 break;
 
             case WAITING_UNLOCK:
@@ -713,18 +730,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        if (!isUnlock) {
-            // 关锁需要确认锁杆已插入
-            new AlertDialog.Builder(this)
-                .setTitle("关锁确认")
-                .setMessage("请确认锁杆已插入到位\n（STATE_KEY和lock_hall都检测到）\n\n确认后点击"关锁"")
-                .setPositiveButton("关锁", (d, w) -> doSendLockCommand(false, oldPassword))
-                .setNegativeButton("取消", null)
-                .show();
-            return;
-        }
-
-        doSendLockCommand(true, oldPassword);
+        doSendLockCommand(isUnlock, oldPassword);
     }
 
     private void doSendLockCommand(boolean isUnlock, String oldPassword) {
@@ -741,12 +747,18 @@ public class MainActivity extends AppCompatActivity {
         pendingNewPassword = null;
         pendingLockAction = isUnlock;
 
-        // 如果已认证，直接发送开关锁指令
+        // 如果已认证
         byte[] key2 = bluetoothManager.getAesKey2();
         if (key2 != null) {
-            appendLog("✓ 已认证，直接发送" + cmdName + "指令");
-            currentStep = isUnlock ? FlowStep.WAITING_UNLOCK : FlowStep.WAITING_LOCK;
-            sendLockForFlow(isUnlock);
+            if (isUnlock) {
+                appendLog("✓ 已认证，直接发送开锁指令");
+                currentStep = FlowStep.WAITING_UNLOCK;
+                sendLockForFlow(true);
+            } else {
+                appendLog("✓ 已认证，等待锁杆插入...");
+                currentStep = FlowStep.WAITING_BAR_INSERT;
+                textStatus.setText("请插入锁杆");
+            }
             return;
         }
 
