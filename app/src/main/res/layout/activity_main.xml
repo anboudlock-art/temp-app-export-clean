@@ -73,7 +73,7 @@
         android:id="@+id/editOldPassword"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:inputType="number"
+        android:inputType="numberPassword"
         android:maxLength="6"
         android:text="000000"
         android:hint="Current password"/>
