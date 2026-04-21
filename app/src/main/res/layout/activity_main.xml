@@ -137,6 +137,31 @@
             android:backgroundTint="#FF9800"/>
     </LinearLayout>
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp">
+
+        <Button
+            android:id="@+id/btnUnlock"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="🔓 开锁"
+            android:layout_marginEnd="4dp"
+            android:backgroundTint="#E53935"/>
+
+        <Button
+            android:id="@+id/btnLock"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="🔒 关锁"
+            android:layout_marginStart="4dp"
+            android:backgroundTint="#1E88E5"/>
+    </LinearLayout>
+
     <Button
         android:id="@+id/btnViewLog"
         android:layout_width="match_parent"

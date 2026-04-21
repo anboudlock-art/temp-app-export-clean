@@ -55,7 +55,7 @@ public class MainActivity extends AppCompatActivity {
     private BluetoothConnectionManager bluetoothManager;
 
     // UI 组件
-    private Button btnScan, btnConnect, btnChangePassword, btnReset, btnTestSend, btnViewLog;
+    private Button btnScan, btnConnect, btnChangePassword, btnReset, btnTestSend, btnViewLog, btnUnlock, btnLock;
     private ListView listViewDevices;
     private EditText editOldPassword, editNewPassword;
     private TextView textStatus, textLog;
@@ -101,6 +101,8 @@ public class MainActivity extends AppCompatActivity {
         btnReset = findViewById(R.id.btnReset);
         btnTestSend = findViewById(R.id.btnTestSend);
         btnViewLog = findViewById(R.id.btnViewLog);
+        btnUnlock = findViewById(R.id.btnUnlock);
+        btnLock = findViewById(R.id.btnLock);
         listViewDevices = findViewById(R.id.listViewDevices);
         editOldPassword = findViewById(R.id.editOldPassword);
         editNewPassword = findViewById(R.id.editNewPassword);
@@ -139,6 +141,8 @@ public class MainActivity extends AppCompatActivity {
         btnTestSend.setOnClickListener(v -> testSendSetTime());
         btnViewLog.setOnClickListener(v -> showLogDialog());
         btnReset.setOnClickListener(v -> resetState());
+        btnUnlock.setOnClickListener(v -> sendLockCommand(true));
+        btnLock.setOnClickListener(v -> sendLockCommand(false));
 
         listViewDevices.setOnItemClickListener((parent, view, position, id) -> {
             if (position >= 0 && position < devicesList.size()) {
@@ -634,6 +638,147 @@ public class MainActivity extends AppCompatActivity {
             logTextView.setText("");
         });
         btnClose.setOnClickListener(v -> dialog.dismiss());
+    }
+
+    // ===================== 开关锁测试 =====================
+
+    private void sendLockCommand(boolean isUnlock) {
+        if (!isConnected) {
+            appendLog("❌ 未连接设备");
+            Toast.makeText(this, "请先连接设备", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String oldPassword = editOldPassword.getText().toString().trim();
+        if (oldPassword.isEmpty() || oldPassword.length() != 6 || !oldPassword.matches("\\d+")) {
+            Toast.makeText(this, "请输入正确的旧密码(6位)", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String cmdName = isUnlock ? "开锁" : "关锁";
+        appendLog("========================================");
+        appendLog("🔧 开始" + cmdName + "测试");
+        appendLog("========================================");
+
+        // 步骤1：SET_TIME
+        appendLog("📤 步骤 1/3: SET_TIME (0x10)");
+        Date sentTime = new Date();
+        byte[] setTimeData = BleLockSdk.setTimeRequest(sentTime);
+        appendLog("   明文: " + HexStringUtils.bytesToHexString(setTimeData));
+
+        byte[] key1 = bluetoothManager.getAesKey1();
+        if (key1 == null) {
+            appendLog("❌ 密钥未初始化");
+            return;
+        }
+
+        byte[] encrypted = ProtoUtil.encryptRequest(key1, setTimeData);
+        bluetoothManager.sendEncryptedData(encrypted, new BluetoothConnectionManager.DataCallback() {
+            @Override
+            public void onDataReceived(byte[] data) {
+                runOnUiThread(() -> {
+                    BleLockSdk.Response resp = BleLockSdk.parseResponse(data);
+                    if (resp != null && resp.cmd == 0x10) {
+                        appendLog("✅ SET_TIME 成功");
+                        bluetoothManager.onSetTimeSuccess(sentTime);
+
+                        // 步骤2：AUTH
+                        sendAuthForLock(oldPassword, isUnlock);
+                    } else {
+                        appendLog("❌ SET_TIME 失败");
+                    }
+                });
+            }
+            @Override
+            public void onDataSent(boolean success) {}
+        });
+    }
+
+    private void sendAuthForLock(String password, boolean isUnlock) {
+        int passInt = Integer.parseInt(password);
+        appendLog("📤 步骤 2/3: 验证密码 (0x20) 密码=" + password);
+
+        byte[] authData = BleLockSdk.authPasswdRequest(passInt);
+        byte[] key2 = bluetoothManager.getCurrentKey();
+        byte[] encrypted = ProtoUtil.encryptRequest(key2, authData);
+
+        bluetoothManager.sendEncryptedData(encrypted, new BluetoothConnectionManager.DataCallback() {
+            @Override
+            public void onDataReceived(byte[] data) {
+                runOnUiThread(() -> {
+                    BleLockSdk.Response resp = BleLockSdk.parseResponse(data);
+                    if (resp != null && resp.cmd == 0x20 && resp.payload.length > 0 && resp.payload[0] == 0x00) {
+                        appendLog("✅ 密码验证成功");
+
+                        // 步骤3：发送开锁/关锁指令
+                        sendLockAction(isUnlock);
+                    } else {
+                        appendLog("❌ 密码验证失败");
+                    }
+                });
+            }
+            @Override
+            public void onDataSent(boolean success) {}
+        });
+    }
+
+    private void sendLockAction(boolean isUnlock) {
+        String cmdName = isUnlock ? "开锁 (0x30)" : "关锁 (0x31)";
+        appendLog("📤 步骤 3/3: " + cmdName);
+
+        byte[] lockData = isUnlock ? BleLockSdk.openLockRequest((byte)0) : BleLockSdk.closeLockRequest((byte)0);
+        appendLog("   明文: " + HexStringUtils.bytesToHexString(lockData));
+
+        byte[] key2 = bluetoothManager.getCurrentKey();
+        byte[] encrypted = ProtoUtil.encryptRequest(key2, lockData);
+
+        bluetoothManager.sendEncryptedData(encrypted, new BluetoothConnectionManager.DataCallback() {
+            @Override
+            public void onDataReceived(byte[] data) {
+                runOnUiThread(() -> {
+                    BleLockSdk.Response resp = BleLockSdk.parseResponse(data);
+                    if (resp != null) {
+                        String cmd = String.format("0x%02X", resp.cmd);
+                        appendLog("📨 收到响应: cmd=" + cmd);
+
+                        if (resp.payload.length >= 4) {
+                            int battery = resp.payload[1] & 0xFF;
+                            int lockState = resp.payload[2] & 0xFF;
+                            String stateStr = (lockState == 0) ? "关锁(已锁)" : "开锁(已开)";
+
+                            appendLog("========================================");
+                            appendLog("📊 锁状态反馈:");
+                            appendLog("   🔋 电量: " + battery + "%");
+                            appendLog("   🔒 锁状态: " + stateStr + " (0x" + String.format("%02X", lockState) + ")");
+                            appendLog("   📡 信号检测: " + (resp.payload.length >= 4 ? "正常" : "异常"));
+
+                            if (resp.cmd == 0x30 && lockState == 1) {
+                                appendLog("   ✅ 开锁成功");
+                            } else if (resp.cmd == 0x30 && lockState == 0) {
+                                appendLog("   ⚠️ 开锁指令已发但锁仍关闭");
+                            } else if (resp.cmd == 0x31 && lockState == 0) {
+                                appendLog("   ✅ 关锁成功");
+                            } else if (resp.cmd == 0x31 && lockState == 1) {
+                                appendLog("   ⚠️ 关锁指令已发但锁仍打开");
+                            }
+                            appendLog("========================================");
+                        } else {
+                            appendLog("   响应数据: " + HexStringUtils.bytesToHexString(resp.payload));
+                        }
+                    } else {
+                        appendLog("❌ 响应解析失败");
+                    }
+                });
+            }
+            @Override
+            public void onDataSent(boolean success) {
+                runOnUiThread(() -> {
+                    if (!success) {
+                        appendLog("❌ 发送失败");
+                    }
+                });
+            }
+        });
     }
 
     // ===================== 重置 =====================
