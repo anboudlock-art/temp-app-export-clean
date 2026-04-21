@@ -713,6 +713,21 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        if (!isUnlock) {
+            // 关锁需要确认锁杆已插入
+            new AlertDialog.Builder(this)
+                .setTitle("关锁确认")
+                .setMessage("请确认锁杆已插入到位\n（STATE_KEY和lock_hall都检测到）\n\n确认后点击"关锁"")
+                .setPositiveButton("关锁", (d, w) -> doSendLockCommand(false, oldPassword))
+                .setNegativeButton("取消", null)
+                .show();
+            return;
+        }
+
+        doSendLockCommand(true, oldPassword);
+    }
+
+    private void doSendLockCommand(boolean isUnlock, String oldPassword) {
         String cmdName = isUnlock ? "开锁" : "关锁";
         appendLog("========================================");
         appendLog("🔧 开始" + cmdName + "测试");
