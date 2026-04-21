@@ -660,7 +660,15 @@ public class MainActivity extends AppCompatActivity {
         appendLog("🔧 开始" + cmdName + "测试");
         appendLog("========================================");
 
-        // 步骤1：SET_TIME
+        // 如果已经认证过（密码修改后），直接发送开关锁指令
+        byte[] key2 = bluetoothManager.getAesKey2();
+        if (key2 != null && bluetoothManager.getCurrentKey() == key2) {
+            appendLog("✓ 已认证，直接发送" + cmdName + "指令");
+            sendLockAction(isUnlock);
+            return;
+        }
+
+        // 未认证，走完整流程：SET_TIME → AUTH → 开关锁
         appendLog("📤 步骤 1/3: SET_TIME (0x10)");
         Date sentTime = new Date();
         byte[] setTimeData = BleLockSdk.setTimeRequest(sentTime);
