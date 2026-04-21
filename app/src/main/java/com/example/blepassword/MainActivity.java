@@ -78,12 +78,15 @@ public class MainActivity extends AppCompatActivity {
         IDLE,
         WAITING_SET_TIME,
         WAITING_AUTH,
-        WAITING_SET_PASSWD
+        WAITING_SET_PASSWD,
+        WAITING_UNLOCK,
+        WAITING_LOCK
     }
     private FlowStep currentStep = FlowStep.IDLE;
-    private String pendingOldPassword;  // 暂存用户输入的旧密码
-    private String pendingNewPassword;  // 暂存用户输入的新密码
-    private Date setTimeDate;  // SET_TIME 发送时的精确时间（用于生成 key2）
+    private String pendingOldPassword;
+    private String pendingNewPassword;
+    private Boolean pendingLockAction;  // true=unlock, false=lock, null=none
+    private Date setTimeDate;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -495,6 +498,23 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void sendLockForFlow(boolean isUnlock) {
+        String cmdName = isUnlock ? "开锁 (0x30)" : "关锁 (0x31)";
+        appendLog("📤 步骤 3/3: " + cmdName);
+        textStatus.setText("步骤 3/3: " + (isUnlock ? "开锁" : "关锁") + "...");
+
+        byte[] request = isUnlock ? BleLockSdk.openLockRequest((byte)0) : BleLockSdk.closeLockRequest((byte)0);
+        byte[] key = bluetoothManager.getCurrentKey();
+
+        appendLog("   明文: " + HexStringUtils.bytesToHexString(request));
+
+        boolean sent = bluetoothManager.sendEncryptedData(request, key, flowDataCallback);
+        if (!sent) {
+            appendLog("❌ " + (isUnlock ? "开锁" : "关锁") + "指令发送失败");
+            resetFlow();
+        }
+    }
+
     /** 统一的数据回调 —— 根据 currentStep 路由到不同处理 */
     private final BluetoothConnectionManager.DataCallback flowDataCallback =
             new BluetoothConnectionManager.DataCallback() {
@@ -562,9 +582,16 @@ public class MainActivity extends AppCompatActivity {
                     Byte authResult = response.getAuthPasswdResult();
                     if (authResult != null && authResult == BleLockSdk.RESULT_SUCCESS) {
                         appendLog("✅ 密码验证成功");
-                        // 进入步骤 3
-                        currentStep = FlowStep.WAITING_SET_PASSWD;
-                        new Handler(Looper.getMainLooper()).postDelayed(this::sendSetPasswdForFlow, 200);
+                        if (currentStep == FlowStep.WAITING_AUTH && pendingNewPassword != null) {
+                            currentStep = FlowStep.WAITING_SET_PASSWD;
+                            new Handler(Looper.getMainLooper()).postDelayed(this::sendSetPasswdForFlow, 200);
+                        } else if (pendingLockAction != null) {
+                            boolean isUnlock = pendingLockAction;
+                            pendingLockAction = null;
+                            FlowStep nextStep = isUnlock ? FlowStep.WAITING_UNLOCK : FlowStep.WAITING_LOCK;
+                            currentStep = nextStep;
+                            new Handler(Looper.getMainLooper()).postDelayed(() -> sendLockForFlow(isUnlock), 200);
+                        }
                     } else {
                         appendLog("❌ 密码验证失败（旧密码不正确？）");
                         appendLog("💡 确认默认密码是否为 000000");
@@ -596,6 +623,37 @@ public class MainActivity extends AppCompatActivity {
                     }
                 } else {
                     appendLog("❌ SET_PASSWD 响应异常: " + response.error);
+                }
+                resetFlow();
+                break;
+
+            case WAITING_UNLOCK:
+            case WAITING_LOCK:
+                boolean isUnlockResp = (currentStep == FlowStep.WAITING_UNLOCK);
+                String lockCmdName = isUnlockResp ? "开锁" : "关锁";
+                if (response.success) {
+                    appendLog("📨 收到" + lockCmdName + "响应: cmd=0x" + String.format("%02X", response.cmd));
+                    if (response.payload != null && response.payload.length >= 4) {
+                        int battery = response.payload[1] & 0xFF;
+                        int lockState = response.payload[2] & 0xFF;
+                        String stateStr = (lockState == 0) ? "关锁(已锁)" : "开锁(已开)";
+                        appendLog("========================================");
+                        appendLog("📊 锁状态反馈:");
+                        appendLog("   🔋 电量: " + battery + "%");
+                        appendLog("   🔒 锁状态: " + stateStr);
+                        if (isUnlockResp && lockState == 1) {
+                            appendLog("   ✅ 开锁成功");
+                        } else if (!isUnlockResp && lockState == 0) {
+                            appendLog("   ✅ 关锁成功");
+                        } else {
+                            appendLog("   ⚠️ " + lockCmdName + "指令已发，等待状态变化");
+                        }
+                        appendLog("========================================");
+                    } else {
+                        appendLog("   响应: " + HexStringUtils.bytesToHexString(response.payload));
+                    }
+                } else {
+                    appendLog("❌ " + lockCmdName + "响应异常: " + response.error);
                 }
                 resetFlow();
                 break;
@@ -658,17 +716,23 @@ public class MainActivity extends AppCompatActivity {
         String cmdName = isUnlock ? "开锁" : "关锁";
         appendLog("========================================");
         appendLog("🔧 开始" + cmdName + "测试");
+        appendLog("   密码: " + oldPassword);
         appendLog("========================================");
 
-        // 如果已经认证过（密码修改后），直接发送开关锁指令
+        pendingOldPassword = oldPassword;
+        pendingNewPassword = null;
+        pendingLockAction = isUnlock;
+
+        // 如果已认证，直接发送开关锁指令
         byte[] key2 = bluetoothManager.getAesKey2();
-        if (key2 != null && bluetoothManager.getCurrentKey() == key2) {
+        if (key2 != null) {
             appendLog("✓ 已认证，直接发送" + cmdName + "指令");
-            sendLockAction(isUnlock);
+            currentStep = isUnlock ? FlowStep.WAITING_UNLOCK : FlowStep.WAITING_LOCK;
+            sendLockForFlow(isUnlock);
             return;
         }
 
-        // 未认证，走完整流程：SET_TIME → AUTH → 开关锁
+        // 未认证，走完整流程
         appendLog("📤 步骤 1/3: SET_TIME (0x10)");
         Date sentTime = new Date();
         byte[] setTimeData = BleLockSdk.setTimeRequest(sentTime);
