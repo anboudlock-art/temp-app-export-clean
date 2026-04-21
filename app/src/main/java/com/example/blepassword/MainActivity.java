@@ -672,8 +672,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        byte[] encrypted = ProtoUtil.encryptRequest(key1, setTimeData);
-        bluetoothManager.sendEncryptedData(encrypted, new BluetoothConnectionManager.DataCallback() {
+        bluetoothManager.sendEncryptedData(setTimeData, key1, new BluetoothConnectionManager.DataCallback() {
             @Override
             public void onDataReceived(byte[] data) {
                 runOnUiThread(() -> {
@@ -700,9 +699,8 @@ public class MainActivity extends AppCompatActivity {
 
         byte[] authData = BleLockSdk.authPasswdRequest(passInt);
         byte[] key2 = bluetoothManager.getCurrentKey();
-        byte[] encrypted = ProtoUtil.encryptRequest(key2, authData);
 
-        bluetoothManager.sendEncryptedData(encrypted, new BluetoothConnectionManager.DataCallback() {
+        bluetoothManager.sendEncryptedData(authData, key2, new BluetoothConnectionManager.DataCallback() {
             @Override
             public void onDataReceived(byte[] data) {
                 runOnUiThread(() -> {
@@ -730,9 +728,8 @@ public class MainActivity extends AppCompatActivity {
         appendLog("   明文: " + HexStringUtils.bytesToHexString(lockData));
 
         byte[] key2 = bluetoothManager.getCurrentKey();
-        byte[] encrypted = ProtoUtil.encryptRequest(key2, lockData);
 
-        bluetoothManager.sendEncryptedData(encrypted, new BluetoothConnectionManager.DataCallback() {
+        bluetoothManager.sendEncryptedData(lockData, key2, new BluetoothConnectionManager.DataCallback() {
             @Override
             public void onDataReceived(byte[] data) {
                 runOnUiThread(() -> {
