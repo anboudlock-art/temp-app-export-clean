@@ -18,7 +18,7 @@
         android:id="@+id/textStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="准备就绪"
+        android:text="Ready"
         android:textSize="14sp"
         android:paddingBottom="8dp"/>
 
@@ -32,7 +32,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="扫描设备"
+            android:text="Scan"
             android:layout_marginEnd="8dp"/>
 
         <Button
@@ -40,14 +40,14 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="连接设备"
+            android:text="Connect"
             android:layout_marginStart="8dp"/>
     </LinearLayout>
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="设备列表"
+        android:text="Device List"
         android:textSize="16sp"
         android:textStyle="bold"
         android:layout_marginTop="16dp"
@@ -64,7 +64,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="旧密码 (6位数字)"
+        android:text="Current Password (6 digits)"
         android:textSize="16sp"
         android:textStyle="bold"
         android:layout_marginTop="16dp"/>
@@ -76,12 +76,12 @@
         android:inputType="number"
         android:maxLength="6"
         android:text="000000"
-        android:hint="当前密码"/>
+        android:hint="Current password"/>
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="新密码 (6位数字)"
+        android:text="New Password (6 digits)"
         android:textSize="16sp"
         android:textStyle="bold"
         android:layout_marginTop="8dp"/>
@@ -92,12 +92,12 @@
         android:layout_height="wrap_content"
         android:inputType="number"
         android:maxLength="6"
-        android:hint="例如: 123456"/>
+        android:hint="e.g. 123456"/>
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="密码编码：数值编码 | 加密：AES-128-ECB"
+        android:text="Encoding: Digit Value | Encryption: AES-128-ECB"
         android:textSize="12sp"
         android:textStyle="bold"
         android:layout_marginTop="8dp"
@@ -114,7 +114,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="测试发送"
+            android:text="Test"
             android:layout_marginEnd="4dp"/>
 
         <Button
@@ -122,7 +122,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="修改密码"
+            android:text="Change PWD"
             android:layout_marginStart="4dp"
             android:layout_marginEnd="4dp"
             android:backgroundTint="#4CAF50"/>
@@ -132,7 +132,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="重置"
+            android:text="Reset"
             android:layout_marginStart="4dp"
             android:backgroundTint="#FF9800"/>
     </LinearLayout>
@@ -148,7 +148,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="🔓 开锁"
+            android:text="Unlock"
             android:layout_marginEnd="4dp"
             android:backgroundTint="#E53935"/>
 
@@ -157,7 +157,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="🔒 关锁"
+            android:text="Lock"
             android:layout_marginStart="4dp"
             android:backgroundTint="#1E88E5"/>
     </LinearLayout>
@@ -166,14 +166,14 @@
         android:id="@+id/btnViewLog"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="📋 查看完整日志"
+        android:text="View Log"
         android:layout_marginTop="8dp"
         android:backgroundTint="#2196F3"/>
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="实时日志"
+        android:text="Live Log"
         android:textSize="16sp"
         android:textStyle="bold"
         android:layout_marginTop="16dp"/>

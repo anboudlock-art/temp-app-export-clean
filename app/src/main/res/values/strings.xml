@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">Anboud Lock</string>
-    <string name="app_description">简化版使用说明：\n1. 点击扫描设备查找蓝牙锁\n2. 选择设备并点击连接设备\n3. 输入新密码（6位数字）\n4. 点击修改密码，等待设备响应\n\n注意：\n- 假设初始密码为 000000\n- 无需验证密码步骤\n- 设备距离需在 2 米内</string>
+    <string name="app_description">Instructions:\n1. Tap Scan to find BLE locks\n2. Select device and tap Connect\n3. Enter current password and new password (6 digits)\n4. Tap Change PWD to modify password\n5. Use Unlock/Lock buttons to test lock operations\n\nDefault password: 000000\nKeep device within 2 meters</string>
 </resources>
