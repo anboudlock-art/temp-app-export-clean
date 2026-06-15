@@ -55,7 +55,7 @@ public class MainActivity extends AppCompatActivity {
     private BluetoothConnectionManager bluetoothManager;
 
     // UI 组件
-    private Button btnScan, btnConnect, btnChangePassword, btnReset, btnTestSend, btnViewLog, btnUnlock, btnLock;
+    private Button btnScan, btnConnect, btnChangePassword, btnReset, btnTestSend, btnViewLog, btnUnlock, btnLock, btnReadDiag;
     private ListView listViewDevices;
     private EditText editOldPassword, editNewPassword;
     private TextView textStatus, textLog;
@@ -81,12 +81,14 @@ public class MainActivity extends AppCompatActivity {
         WAITING_SET_PASSWD,
         WAITING_UNLOCK,
         WAITING_LOCK,
-        WAITING_BAR_INSERT
+        WAITING_BAR_INSERT,
+        WAITING_DIAG
     }
     private FlowStep currentStep = FlowStep.IDLE;
     private String pendingOldPassword;
     private String pendingNewPassword;
     private Boolean pendingLockAction;  // true=unlock, false=lock, null=none
+    private boolean pendingReadDiag = false;
     private Date setTimeDate;
 
     @Override
@@ -107,6 +109,7 @@ public class MainActivity extends AppCompatActivity {
         btnViewLog = findViewById(R.id.btnViewLog);
         btnUnlock = findViewById(R.id.btnUnlock);
         btnLock = findViewById(R.id.btnLock);
+        btnReadDiag = findViewById(R.id.btnReadDiag);
         listViewDevices = findViewById(R.id.listViewDevices);
         editOldPassword = findViewById(R.id.editOldPassword);
         editNewPassword = findViewById(R.id.editNewPassword);
@@ -147,6 +150,7 @@ public class MainActivity extends AppCompatActivity {
         btnReset.setOnClickListener(v -> resetState());
         btnUnlock.setOnClickListener(v -> sendLockCommand(true));
         btnLock.setOnClickListener(v -> sendLockCommand(false));
+        btnReadDiag.setOnClickListener(v -> readDiag());
 
         listViewDevices.setOnItemClickListener((parent, view, position, id) -> {
             if (position >= 0 && position < devicesList.size()) {
@@ -598,6 +602,9 @@ public class MainActivity extends AppCompatActivity {
                                 appendLog("⏳ 等待锁杆插入...");
                                 textStatus.setText("请插入锁杆");
                             }
+                        } else if (pendingReadDiag) {
+                            currentStep = FlowStep.WAITING_DIAG;
+                            new Handler(Looper.getMainLooper()).postDelayed(this::sendDiagForFlow, 200);
                         }
                     } else {
                         appendLog("❌ 密码验证失败（旧密码不正确？）");
@@ -674,12 +681,50 @@ public class MainActivity extends AppCompatActivity {
                 }
                 resetFlow();
                 break;
+
+            case WAITING_DIAG:
+                if (response.success && response.cmd == BleLockSdk.CMD_READ_DIAG
+                        && response.payload != null && response.payload.length >= 5) {
+                    int ss = response.payload[0] & 0xFF;
+                    int lockState = response.payload[1] & 0xFF;
+                    int keyStateLock = response.payload[2] & 0xFF;
+                    int wakeIo = response.payload[3] & 0xFF;
+                    int wakeCnt = response.payload[4] & 0xFF;
+                    appendLog("========================================");
+                    appendLog("\uD83E\uDE7A 休眠诊断 (0x42):");
+                    appendLog("   Systerm_States = 0x" + String.format("%02X", ss) + "  [" + decodeStates(ss) + "]");
+                    appendLog("   lock_state     = " + lockState);
+                    appendLog("   key_state_lock = " + keyStateLock);
+                    appendLog("   wakeIo  = " + (wakeIo == 0xFF ? "0xFF(无)" : ("GPIO" + wakeIo)));
+                    appendLog("   wakeCnt = " + wakeCnt);
+                    appendLog("========================================");
+                    textStatus.setText("诊断 SS=0x" + String.format("%02X", ss) + " [" + decodeStates(ss) + "]");
+                } else {
+                    appendLog("\u274C 0x42 响应异常: " + (response.success ? HexStringUtils.bytesToHexString(response.payload) : response.error));
+                    textStatus.setText("读诊断失败");
+                }
+                resetFlow();
+                break;
         }
+    }
+
+    /** 解码 Systerm_States 标志位（来自固件 user_app.h） */
+    private String decodeStates(int ss) {
+        if (ss == 0) return "SLEEP";
+        StringBuilder sb = new StringBuilder();
+        if ((ss & 0x01) != 0) sb.append("POWERON ");
+        if ((ss & 0x02) != 0) sb.append("AUTOLOCK ");
+        if ((ss & 0x04) != 0) sb.append("BATDISCHG ");
+        if ((ss & 0x40) != 0) sb.append("STARTUP ");
+        if ((ss & 0x80) != 0) sb.append("OTAMODE ");
+        return sb.toString().trim();
     }
 
     private void resetFlow() {
         currentStep = FlowStep.IDLE;
         pendingNewPassword = null;
+        pendingLockAction = null;
+        pendingReadDiag = false;
         runOnUiThread(() -> btnChangePassword.setEnabled(isConnected));
     }
 
@@ -767,6 +812,43 @@ public class MainActivity extends AppCompatActivity {
         sendSetTimeForFlow();
     }
 
+    // ===================== 读休眠诊断 (0x42) =====================
+
+    private void readDiag() {
+        if (!isConnected) {
+            appendLog("\u274C 未连接设备");
+            Toast.makeText(this, "请先连接设备", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String pwd = editOldPassword.getText().toString().trim();
+        if (pwd.isEmpty() || pwd.length() != 6 || !pwd.matches("\\d+")) {
+            Toast.makeText(this, "请输入正确的密码(6位)", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        appendLog("========================================");
+        appendLog("\uD83E\uDE7A 读休眠诊断 (0x42)  密码=" + pwd);
+        appendLog("   流程: SET_TIME -> 验证 -> 0x42");
+        pendingOldPassword = pwd;
+        pendingNewPassword = null;
+        pendingLockAction = null;
+        pendingReadDiag = true;
+        currentStep = FlowStep.WAITING_SET_TIME;
+        sendSetTimeForFlow();
+    }
+
+    private void sendDiagForFlow() {
+        appendLog("\uD83D\uDCE4 发送读诊断 (0x42)");
+        textStatus.setText("读取休眠诊断...");
+        byte[] request = BleLockSdk.readDiagRequest(false);   // clear=false 只读不清零
+        byte[] key = bluetoothManager.getCurrentKey();        // key2
+        appendLog("   明文: " + HexStringUtils.bytesToHexString(request));
+        boolean sent = bluetoothManager.sendEncryptedData(request, key, flowDataCallback);
+        if (!sent) {
+            appendLog("\u274C 0x42 发送失败");
+            resetFlow();
+        }
+    }
+
     // ===================== 重置 =====================
 
     private void resetState() {
@@ -795,6 +877,7 @@ public class MainActivity extends AppCompatActivity {
         btnConnect.setEnabled(!isConnected && selectedDevice != null);
         btnChangePassword.setEnabled(isConnected);
         btnTestSend.setEnabled(isConnected);
+        btnReadDiag.setEnabled(isConnected);
         btnReset.setEnabled(true);
         btnViewLog.setEnabled(true);
         editNewPassword.setEnabled(isConnected);

@@ -26,6 +26,7 @@ public class BleLockSdk {
     public static final byte CMD_OPEN_LOCK = 0x30;
     public static final byte CMD_CLOSE_LOCK = 0x31;
     public static final byte CMD_GET_STATUS = 0x40;
+    public static final byte CMD_READ_DIAG = 0x42;        // 读休眠诊断状态
     public static final byte CMD_FORCE_SLEEP = 0x50;
 
     // 结果定义
@@ -159,6 +160,21 @@ public class BleLockSdk {
                 ProtoUtil.REQUEST_HEAD,
                 nextCmdId(),
                 CMD_FORCE_SLEEP,
+                0x00
+        };
+    }
+
+    /**
+     * 生成读休眠诊断请求（0x42 命令）
+     * 格式：55 [cmdId] 42 [clear] [CS]（与 0x40 状态查询同构）
+     * @param clear true=读后清零唤醒计数
+     */
+    public static byte[] readDiagRequest(boolean clear) {
+        return new byte[]{
+                ProtoUtil.REQUEST_HEAD,
+                nextCmdId(),
+                CMD_READ_DIAG,
+                (byte) (clear ? 0x01 : 0x00),
                 0x00
         };
     }

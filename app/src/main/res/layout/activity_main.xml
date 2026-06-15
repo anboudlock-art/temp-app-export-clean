@@ -163,6 +163,14 @@
     </LinearLayout>
 
     <Button
+        android:id="@+id/btnReadDiag"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="\uD83E\uDE7A 读休眠诊断 (0x42)"
+        android:layout_marginTop="8dp"
+        android:backgroundTint="#9C27B0"/>
+
+    <Button
         android:id="@+id/btnViewLog"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
