@@ -2,407 +2,196 @@ package com.example.blepassword;
 
 import android.util.Log;
 
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.UUID;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
- * 蓝牙锁 SDK - 最终修复版本（基于SYD8811_FINAL_REAL_FIX.bin固件分析）
- * 
- * 固件功能确认：
- * - 支持0x21密码修改命令（REAL_0x21_FUNCTION）
- * - 密码编码：ASCII字符编码
- * - 校验和算法：累加+异或双重校验 checksum = XOR(all bytes) + SUM(all bytes)
- * - 两步验证：先0x20验证旧密码 → 再0x21修改新密码
- * - 默认密码：000000
- * 
- * 协议格式：
- * - 命令：55 01 CMD [DATA...] CS（固定10字节）
- * - 响应：AA 01 CMD ST CS（固定5字节）
+ * 蓝牙锁协议 —— 与《智能锁4G+蓝牙通讯协议 v2.0》一致（量产固件 v1.14 逐行核对）。
+ *
+ * 明文帧:   55 | 指令ID | CMD | 参数… | 校验和        校验和 = 指令ID..参数 累加低 8 位
+ * 回复帧:   AA | 指令ID | CMD | 应答… | 校验和
+ * 加密:     AES-128-ECB, 16 字节容器  FB | len | 明文帧 | FC FC …
+ * 密钥:     key1 = MAC(6, 广播名顺序) + 11 22 33 44 55 66 77 88 99 AA
+ *           key2 = key1, [10..15] 换成 0x10 命令里的 年-2000 月 日 时 分 秒
+ *           0x10 用 key1, 之后全部用 key2
  */
-public class BleLockSdk {
+public final class BleLockSdk {
     private static final String TAG = "BleLockSdk";
 
-    // 协议常量
-    private static final byte REQUEST_HEAD = 0x55;  // 命令起始字节
-    private static final byte RESPONSE_HEAD = (byte) 0xAA;  // 响应起始字节
-    private static final byte DATA_TYPE = 0x01;  // 数据类型（固定）
+    public static final UUID SERVICE_UUID = UUID.fromString("6E40000A-B5A3-F393-E0A9-E50E24DCCA9E");
+    public static final UUID NOTIFY_UUID  = UUID.fromString("6E40000B-B5A3-F393-E0A9-E50E24DCCA9E");
+    public static final UUID WRITE_UUID   = UUID.fromString("6E40000C-B5A3-F393-E0A9-E50E24DCCA9E");
 
-    // 指令定义
-    public static final byte CMD_SET_TIME = 0x10;           // 时间设置
-    public static final byte CMD_AUTH_PASSWD = 0x20;        // 密码验证
-    public static final byte CMD_SET_AUTH_PASSWD = 0x21;    // 密码设置
-    public static final byte CMD_OPEN_LOCK = 0x30;          // 开锁
-    public static final byte CMD_CLOSE_LOCK = 0x31;         // 关锁
-    public static final byte CMD_GET_STATUS = 0x40;         // 状态查询
-    public static final byte CMD_FORCE_SLEEP = 0x50;        // 强制休眠
+    public static final byte REQ_HEAD    = 0x55;
+    public static final byte RESP_HEAD   = (byte) 0xAA;
+    public static final byte CIPHER_HEAD = (byte) 0xFB;
+    public static final byte CIPHER_FILL = (byte) 0xFC;
 
-    // 结果定义
-    public static final byte RESULT_SUCCESS = 0x00;         // 成功
-    public static final byte RESULT_FAILURE = 0x01;         // 失败
-    public static final byte STATUS_CLOSED = 0x00;          // 上锁/关闭
-    public static final byte STATUS_OPENED = 0x01;          // 未上锁/打开
+    public static final byte CMD_SET_TIME        = 0x10;
+    public static final byte CMD_AUTH_PASSWD     = 0x20;
+    public static final byte CMD_SET_AUTH_PASSWD = 0x21;
+    public static final byte CMD_OPEN_LOCK       = 0x30;
+    public static final byte CMD_CLOSE_LOCK      = 0x31;
+    public static final byte CMD_GET_STATUS      = 0x40;
+    public static final byte CMD_FORCE_SLEEP     = 0x50;
 
-    // ===================== 校验和计算（基于固件分析）=====================
+    public static final byte RESULT_SUCCESS = 0x00;
+    public static final byte RESULT_FAILURE = 0x01;
 
-    /**
-     * 计算校验和 - 累加+异或双重校验（SYD8811固件确认算法）
-     * 公式：checksum = XOR(all bytes) + SUM(all bytes)
-     */
-    public static byte calculateChecksum(byte[] data, int length) {
-        if (data == null || data.length == 0) return 0;
+    private BleLockSdk() {}
 
-        int sum = 0;
-        byte xor_val = 0;
-        
-        for (int i = 0; i < length && i < data.length; i++) {
-            sum += data[i] & 0xFF;  // 使用 & 0xFF 确保无符号累加
-            xor_val ^= data[i];
-        }
-        
-        // 双重校验：累加和异或相加
-        int checksum = (xor_val & 0xFF) + (sum & 0xFF);
-        return (byte) (checksum & 0xFF);  // 取低8位
+    // ---------------- 密钥 ----------------
+
+    /** mac 形如 "20:25:10:23:A8:00"（Android 的 device.getAddress()），顺序即广播名里的顺序 */
+    public static byte[] deriveKey1(String mac) {
+        byte[] m = HexStringUtils.hexStringToBytes(mac.replace(":", "").replace("-", ""));
+        if (m == null || m.length != 6) throw new IllegalArgumentException("MAC 必须 6 字节: " + mac);
+        byte[] key = new byte[16];
+        System.arraycopy(m, 0, key, 0, 6);
+        for (int i = 0; i < 10; i++) key[6 + i] = (byte) (0x11 * (i + 1));
+        return key;
     }
 
-    // ===================== 密码编码（基于固件分析）=====================
-
-    /**
-     * 编码密码字符串为字节数组 - ASCII编码（固件确认）
-     * @param password 6位数字字符串
-     * @return 6字节数组（ASCII编码）
-     */
-    private static byte[] encodePassword(String password) {
-        if (password == null || password.length() != 6) {
-            throw new IllegalArgumentException("密码必须是6位");
-        }
-
-        byte[] result = new byte[6];
-        
-        // ASCII编码：每个字节是字符的 ASCII 值
-        // 例如：'1' -> 0x31, '2' -> 0x32, '0' -> 0x30
-        for (int i = 0; i < 6; i++) {
-            result[i] = (byte) password.charAt(i);
-        }
-        
-        log("密码编码（ASCII）: " + password + " -> " + HexStringUtils.bytesToHexString(result));
-        return result;
-    }
-
-    // ===================== Request =====================
-
-    /**
-     * 生成时间设置请求
-     */
-    public static byte[] setTimeRequest(Date time) {
+    public static byte[] deriveKey2(byte[] key1, Date t) {
+        byte[] key2 = key1.clone();
         Calendar c = Calendar.getInstance();
-        c.setTime(time);
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_SET_TIME;
-        request[3] = (byte) (c.get(Calendar.YEAR) - 2000);
-        request[4] = (byte) (c.get(Calendar.MONTH) + 1);
-        request[5] = (byte) c.get(Calendar.DAY_OF_MONTH);
-        request[6] = (byte) c.get(Calendar.HOUR_OF_DAY);
-        request[7] = (byte) c.get(Calendar.MINUTE);
-        request[8] = 0x00;  // 填充
-        request[9] = calculateChecksum(request, 9);
-        return request;
+        c.setTime(t);
+        key2[10] = (byte) (c.get(Calendar.YEAR) - 2000);
+        key2[11] = (byte) (c.get(Calendar.MONTH) + 1);
+        key2[12] = (byte) c.get(Calendar.DAY_OF_MONTH);
+        key2[13] = (byte) c.get(Calendar.HOUR_OF_DAY);
+        key2[14] = (byte) c.get(Calendar.MINUTE);
+        key2[15] = (byte) c.get(Calendar.SECOND);
+        return key2;
     }
 
-    /**
-     * 生成密码验证请求（0x20命令）
-     * 命令格式：55 01 20 [密码6字节] 00 00 CS（10字节）
-     */
-    public static byte[] authPasswdRequest(String password) {
-        if (password == null || password.length() != 6) {
-            throw new IllegalArgumentException("密码必须是6位");
+    // ---------------- 帧 ----------------
+
+    public static byte checksum(byte[] buf, int start, int len) {
+        int sum = 0;
+        for (int i = start; i < start + len; i++) sum += buf[i] & 0xFF;
+        return (byte) (sum & 0xFF);
+    }
+
+    private static byte[] buildFrame(byte cmd, byte[] params, int cmdId) {
+        byte[] raw = new byte[3 + params.length + 1];
+        raw[0] = REQ_HEAD;
+        raw[1] = (byte) cmdId;
+        raw[2] = cmd;
+        System.arraycopy(params, 0, raw, 3, params.length);
+        raw[raw.length - 1] = checksum(raw, 1, raw.length - 2);
+        return raw;
+    }
+
+    public static byte[] buildSetTime(int cmdId, Date t) {
+        Calendar c = Calendar.getInstance();
+        c.setTime(t);
+        byte[] p = {
+            (byte) (c.get(Calendar.YEAR) - 2000),
+            (byte) (c.get(Calendar.MONTH) + 1),
+            (byte) c.get(Calendar.DAY_OF_MONTH),
+            (byte) c.get(Calendar.HOUR_OF_DAY),
+            (byte) c.get(Calendar.MINUTE),
+            (byte) c.get(Calendar.SECOND),
+        };
+        return buildFrame(CMD_SET_TIME, p, cmdId);
+    }
+
+    /** 6 位数字密码 → 每位一字节 0..9（不是 ASCII） */
+    private static byte[] digits6(String passwd) {
+        if (passwd == null || !passwd.matches("\\d{6}")) throw new IllegalArgumentException("密码必须是 6 位数字");
+        byte[] d = new byte[6];
+        for (int i = 0; i < 6; i++) d[i] = (byte) (passwd.charAt(i) - '0');
+        return d;
+    }
+
+    public static byte[] buildAuthPasswd(int cmdId, String passwd) {
+        return buildFrame(CMD_AUTH_PASSWD, digits6(passwd), cmdId);
+    }
+
+    public static byte[] buildSetAuthPasswd(int cmdId, String passwd) {
+        return buildFrame(CMD_SET_AUTH_PASSWD, digits6(passwd), cmdId);
+    }
+
+    public static byte[] buildGetStatus(int cmdId) {
+        return buildFrame(CMD_GET_STATUS, new byte[]{0x01}, cmdId);
+    }
+
+    // ---------------- 加密容器 ----------------
+
+    public static byte[] pack16(byte[] raw) {
+        if (raw.length > 14) throw new IllegalArgumentException("明文帧不能超过 14 字节");
+        byte[] block = new byte[16];
+        Arrays.fill(block, CIPHER_FILL);
+        block[0] = CIPHER_HEAD;
+        block[1] = (byte) raw.length;
+        System.arraycopy(raw, 0, block, 2, raw.length);
+        return block;
+    }
+
+    public static byte[] unpack16(byte[] block) {
+        if (block.length != 16) throw new IllegalArgumentException("密文块必须 16 字节");
+        if (block[0] != CIPHER_HEAD) throw new IllegalArgumentException("容器头不是 FB (密钥不对?)");
+        int len = block[1] & 0xFF;
+        if (len < 1 || len > 14) throw new IllegalArgumentException("容器长度非法: " + len);
+        return Arrays.copyOfRange(block, 2, 2 + len);
+    }
+
+    private static byte[] aes(byte[] key, byte[] block, int mode) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/ECB/NoPadding");
+        cipher.init(mode, new SecretKeySpec(key, "AES"));
+        return cipher.doFinal(block);
+    }
+
+    /** 明文帧 → 16 字节密文（直接写特征） */
+    public static byte[] encrypt(byte[] key, byte[] rawFrame) throws Exception {
+        return aes(key, pack16(rawFrame), Cipher.ENCRYPT_MODE);
+    }
+
+    /** 16 字节密文（通知收到的）→ 明文回复帧 */
+    public static byte[] decrypt(byte[] key, byte[] encrypted) throws Exception {
+        return unpack16(aes(key, encrypted, Cipher.DECRYPT_MODE));
+    }
+
+    // ---------------- 回复解析 ----------------
+
+    public static final class Response {
+        public final int cmdId;
+        public final byte cmd;
+        public final byte[] payload;
+        public final byte[] raw;
+
+        Response(int cmdId, byte cmd, byte[] payload, byte[] raw) {
+            this.cmdId = cmdId; this.cmd = cmd; this.payload = payload; this.raw = raw;
         }
 
-        byte[] request = new byte[10];
-
-        // 帧头
-        request[0] = REQUEST_HEAD;          // 0x55
-
-        // 数据类型
-        request[1] = DATA_TYPE;             // 0x01
-
-        // 命令码
-        request[2] = CMD_AUTH_PASSWD;       // 0x20
-
-        // 密码编码（ASCII编码）
-        byte[] encodedPassword = encodePassword(password);
-        System.arraycopy(encodedPassword, 0, request, 3, 6);
-
-        // 填充字节
-        request[7] = 0x00;  // 响应类型
-        request[8] = 0x00;  // 保留
-
-        // 校验和（累加+异或双重校验）
-        request[9] = calculateChecksum(request, 9);
-
-        log("生成验证密码请求: " + HexStringUtils.bytesToHexString(request));
-        log("  帧头: 0x" + String.format("%02X", request[0]));
-        log("  类型: 0x" + String.format("%02X", request[1]));
-        log("  命令: 0x" + String.format("%02X", request[2]));
-        log("  密码(ASCII): " + HexStringUtils.bytesToHexString(request, 3, 6));
-        log("  响应类型: 0x" + String.format("%02X", request[7]));
-        log("  保留: 0x" + String.format("%02X", request[8]));
-        log("  校验和: 0x" + String.format("%02X", request[9]));
-
-        return request;
-    }
-
-    /**
-     * 生成密码验证请求（整数版本，兼容旧接口）
-     */
-    public static byte[] authPasswdRequest(int passwd) {
-        if (passwd < 0 || passwd > 999999) {
-            throw new IllegalArgumentException("密码范围错误 (0-999999)");
+        /** 0x20 / 0x21 的应答字节；其它命令返回 -1 */
+        public int status() {
+            return (cmd == CMD_AUTH_PASSWD || cmd == CMD_SET_AUTH_PASSWD) && payload.length >= 1
+                    ? (payload[0] & 0xFF) : -1;
         }
-        // 转换为6位字符串，带前导零
-        String passwordStr = String.format("%06d", passwd);
-        return authPasswdRequest(passwordStr);
     }
 
-    /**
-     * 生成密码设置请求（0x21命令）
-     * 命令格式：55 01 21 [用户ID] [长度] [密码6字节] CS（10字节）
-     */
-    public static byte[] setAuthPasswdRequest(String password) {
-        if (password == null || password.length() != 6) {
-            throw new IllegalArgumentException("密码必须是6位");
-        }
-
-        byte[] request = new byte[10];
-
-        // 帧头
-        request[0] = REQUEST_HEAD;          // 0x55
-
-        // 数据类型
-        request[1] = DATA_TYPE;             // 0x01
-
-        // 命令码
-        request[2] = CMD_SET_AUTH_PASSWD;   // 0x21
-
-        // 用户ID（固定使用0x00）
-        request[3] = 0x00;
-
-        // 密码长度（固定6字节）
-        request[4] = 0x06;
-
-        // 密码编码（ASCII编码）
-        byte[] encodedPassword = encodePassword(password);
-        System.arraycopy(encodedPassword, 0, request, 5, 6);
-
-        // 注意：实际只使用了5-10字节（5字节+校验和），第3-4字节是用户ID和长度
-        // 重新构建正确的请求格式
-        byte[] correctRequest = new byte[10];
-        correctRequest[0] = REQUEST_HEAD;
-        correctRequest[1] = DATA_TYPE;
-        correctRequest[2] = CMD_SET_AUTH_PASSWD;
-        correctRequest[3] = 0x00;  // 用户ID
-        correctRequest[4] = 0x06;  // 密码长度
-        System.arraycopy(encodedPassword, 0, correctRequest, 5, 4); // 只能放4字节密码？
-        
-        // 实际上，固件可能使用简化的格式
-        // 让我们使用更简单的格式：55 01 21 [密码6字节] [填充2字节] CS
-        byte[] simpleRequest = new byte[10];
-        simpleRequest[0] = REQUEST_HEAD;
-        simpleRequest[1] = DATA_TYPE;
-        simpleRequest[2] = CMD_SET_AUTH_PASSWD;
-        System.arraycopy(encodedPassword, 0, simpleRequest, 3, 6); // 密码放在3-8字节
-        simpleRequest[9] = calculateChecksum(simpleRequest, 9); // 9字节校验和
-
-        log("生成修改密码请求: " + HexStringUtils.bytesToHexString(simpleRequest));
-        log("  帧头: 0x" + String.format("%02X", simpleRequest[0]));
-        log("  类型: 0x" + String.format("%02X", simpleRequest[1]));
-        log("  命令: 0x" + String.format("%02X", simpleRequest[2]));
-        log("  新密码(ASCII): " + HexStringUtils.bytesToHexString(simpleRequest, 3, 6));
-        log("  校验和: 0x" + String.format("%02X", simpleRequest[9]));
-
-        return simpleRequest;
+    public static Response parseResponse(byte[] raw) {
+        if (raw.length < 4) throw new IllegalArgumentException("回复太短: " + raw.length);
+        if (raw[0] != RESP_HEAD) throw new IllegalArgumentException("回复帧头不是 AA");
+        byte expect = checksum(raw, 1, raw.length - 2);
+        if (expect != raw[raw.length - 1]) throw new IllegalArgumentException("回复校验和错误");
+        return new Response(raw[1] & 0xFF, raw[2], Arrays.copyOfRange(raw, 3, raw.length - 1), raw);
     }
 
-    /**
-     * 生成密码设置请求（整数版本，兼容旧接口）
-     */
-    public static byte[] setAuthPasswdRequest(int passwd) {
-        if (passwd < 0 || passwd > 999999) {
-            throw new IllegalArgumentException("密码范围错误 (0-999999)");
-        }
-        // 转换为6位字符串，带前导零
-        String passwordStr = String.format("%06d", passwd);
-        return setAuthPasswdRequest(passwordStr);
-    }
-
-    /**
-     * 生成开锁请求
-     */
-    public static byte[] openLockRequest(byte sleepMode) {
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_OPEN_LOCK;
-        request[3] = sleepMode;
-        request[9] = calculateChecksum(request, 9);
-        return request;
-    }
-
-    /**
-     * 生成关锁请求
-     */
-    public static byte[] closeLockRequest(byte sleepMode) {
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_CLOSE_LOCK;
-        request[3] = sleepMode;
-        request[9] = calculateChecksum(request, 9);
-        return request;
-    }
-
-    /**
-     * 生成状态查询请求
-     */
-    public static byte[] getStatusRequest(byte sleepMode) {
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_GET_STATUS;
-        request[3] = sleepMode;
-        request[9] = calculateChecksum(request, 9);
-        return request;
-    }
-
-    /**
-     * 生成强制休眠请求
-     */
-    public static byte[] forceSleepRequest() {
-        byte[] request = new byte[10];
-        request[0] = REQUEST_HEAD;
-        request[1] = DATA_TYPE;
-        request[2] = CMD_FORCE_SLEEP;
-        request[9] = calculateChecksum(request, 9);
-        return request;
-    }
-
-    // ===================== Response =====================
-
-    /**
-     * 解析响应（SYD8811协议）
-     * 响应格式：AA 01 CMD ST CS（固定5字节）
-     */
-    public static Response parseResponse(byte[] responseData) {
-        log("================== 解析响应 ==================");
-        log("响应数据: " + HexStringUtils.bytesToHexString(responseData));
-        log("数据长度: " + responseData.length + " 字节");
-
-        // 检查数据长度（至少需要5字节：帧头+类型+命令+状态+校验和）
-        if (responseData.length < 5) {
-            log("错误: 响应数据长度不足，至少需要 5 字节，实际: " + responseData.length);
-            return new Response(false, "响应数据长度不足", null, (byte) 0, (byte) 0);
-        }
-
-        // 检查帧头
-        log("响应帧头: 0x" + String.format("%02X", responseData[0]));
-        if (responseData[0] != RESPONSE_HEAD) {
-            log("错误: 响应帧头错误，期望: 0xAA，实际: 0x" + String.format("%02X", responseData[0]));
-            return new Response(false, "响应帧头错误", null, (byte) 0, (byte) 0);
-        }
-
-        // 检查类型字段
-        log("类型字段: 0x" + String.format("%02X", responseData[1]));
-        if (responseData[1] != DATA_TYPE) {
-            log("警告: 类型字段不是 0x01，实际: 0x" + String.format("%02X", responseData[1]));
-        }
-
-        byte cmd = responseData[2];
-        byte status = responseData[3];
-        byte checksum = responseData[4];
-
-        // 计算校验和（累加+异或双重校验）
-        int sum = (responseData[0] & 0xFF) + (responseData[1] & 0xFF) + 
-                  (responseData[2] & 0xFF) + (responseData[3] & 0xFF);
-        byte xor_val = (byte) (responseData[0] ^ responseData[1] ^ 
-                             responseData[2] ^ responseData[3]);
-        int calculatedChecksum = (xor_val & 0xFF) + (sum & 0xFF);
-        
-        log("计算校验和（累加）: 0x" + String.format("%02X", sum & 0xFF));
-        log("计算校验和（异或）: 0x" + String.format("%02X", xor_val & 0xFF));
-        log("计算校验和（双重）: 0x" + String.format("%02X", calculatedChecksum & 0xFF));
-        log("实际校验和: 0x" + String.format("%02X", checksum));
-
-        boolean checksumValid = (calculatedChecksum & 0xFF) == (checksum & 0xFF);
-        
-        if (!checksumValid) {
-            log("警告: 响应校验和不匹配");
-        } else {
-            log("校验和验证通过");
-        }
-
-        log("命令: 0x" + String.format("%02X", cmd));
-        log("状态: 0x" + String.format("%02X", status));
-        log("==============================================");
-
-        return new Response(checksumValid, checksumValid ? "" : "校验和错误", responseData, cmd, status);
-    }
-
-    /**
-     * 响应数据类
-     */
-    public static class Response {
-        public boolean success;
-        public String error;
-        public byte[] data;
-        public byte cmd;
-        public byte status;
-
-        public Response(boolean success, String error, byte[] data, byte cmd, byte status) {
-            this.success = success;
-            this.error = error;
-            this.data = data;
-            this.cmd = cmd;
-            this.status = status;
-        }
-
-        public Byte getAuthPasswdResult() {
-            if (cmd == CMD_AUTH_PASSWD) {
-                return status == RESULT_SUCCESS ? RESULT_SUCCESS : RESULT_FAILURE;
-            }
+    /** 解密 + 解析，失败返回 null（多半是密钥不对） */
+    public static Response decryptResponse(byte[] key, byte[] encrypted) {
+        try {
+            return parseResponse(decrypt(key, encrypted));
+        } catch (Exception e) {
+            Log.d(TAG, "解密/解析失败: " + e.getMessage());
             return null;
         }
-
-        public Byte getSetAuthPasswdResult() {
-            if (cmd == CMD_SET_AUTH_PASSWD) {
-                return status == RESULT_SUCCESS ? RESULT_SUCCESS : RESULT_FAILURE;
-            }
-            return null;
-        }
-
-        public Byte getStatusResult() {
-            if (cmd == CMD_GET_STATUS) {
-                return status;
-            }
-            return null;
-        }
-
-        public Byte getOpenLockResult() {
-            if (cmd == CMD_OPEN_LOCK) {
-                return status;
-            }
-            return null;
-        }
-
-        public Byte getCloseLockResult() {
-            if (cmd == CMD_CLOSE_LOCK) {
-                return status;
-            }
-            return null;
-        }
-    }
-
-    private static void log(String message) {
-        Log.d(TAG, message);
     }
 }

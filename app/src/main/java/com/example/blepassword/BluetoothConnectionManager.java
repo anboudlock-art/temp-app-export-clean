@@ -10,95 +10,68 @@ import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.content.Context;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
-import androidx.annotation.Nullable;
-import androidx.annotation.RequiresApi;
-
-import java.util.ArrayList;
-import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.CopyOnWriteArraySet;
 
 /**
- * 蓝牙连接管理器 - 负责扫描、连接、服务发现和数据传输
- * 
- * Nordic UART Service UUIDs (SYD8811协议):
- * - Service: 6E400007-B5A3-F393-E0A9-E50E24DCCA9E
- * - TX Characteristic: 6E400008-B5A3-F393-E0A9-E50E24DCCA9E (Device → Phone)
- * - RX Characteristic: 6E400009-B5A3-F393-E0A9-E50E24DCCA9E (Phone → Device)
- * - CCC Descriptor: 00002902-0000-1000-8000-00805F9B34FB
+ * 蓝牙连接管理：扫描、连接、开通知、原样收发 16 字节密文。
+ * 加密/解密不在这里做，见 BleLockSdk。
+ *
+ * 锁的 GATT（《智能锁4G+蓝牙通讯协议 v2.0》）：
+ *   Service  6E40000A-B5A3-F393-E0A9-E50E24DCCA9E
+ *   Notify   6E40000B-…   锁 → 手机
+ *   Write    6E40000C-…   手机 → 锁
  */
 public class BluetoothConnectionManager {
     private static final String TAG = "BluetoothManager";
 
-    // Nordic UART Service UUIDs (SYD8811协议标准配置)
-    private static final UUID NORDIC_UART_SERVICE_UUID = UUID.fromString("6E400007-B5A3-F393-E0A9-E50E24DCCA9E");
-    private static final UUID TX_CHARACTERISTIC_UUID = UUID.fromString("6E400008-B5A3-F393-E0A9-E50E24DCCA9E");
-    private static final UUID RX_CHARACTERISTIC_UUID = UUID.fromString("6E400009-B5A3-F393-E0A9-E50E24DCCA9E");
     private static final UUID CCC_DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB");
 
     private static final int SCAN_TIMEOUT_MS = 10000;
     private static final int CONNECTION_TIMEOUT_MS = 15000;
 
-    private Context context;
-    private BluetoothAdapter bluetoothAdapter;
+    private final Context context;
+    private final BluetoothAdapter bluetoothAdapter;
     private BluetoothGatt bluetoothGatt;
-    private BluetoothGattCharacteristic rxCharacteristic;
-    private BluetoothGattCharacteristic txCharacteristic;
+    private BluetoothGattCharacteristic writeCharacteristic;
+    private BluetoothGattCharacteristic notifyCharacteristic;
 
     private ScanCallback scanCallback;
     private ConnectionCallback connectionCallback;
-    private DataCallback currentDataCallback;
+    private DataListener dataListener;
 
     private final Handler scanTimeoutHandler = new Handler(Looper.getMainLooper());
     private final Handler connectionTimeoutHandler = new Handler(Looper.getMainLooper());
-    private final Handler dataTimeoutHandler = new Handler(Looper.getMainLooper());
 
     private boolean isScanning = false;
     private boolean isConnecting = false;
+    private String connectedAddress = null;
 
-    private final CopyOnWriteArraySet<String> pendingCallbacks = new CopyOnWriteArraySet<>();
-
-    /**
-     * 扫描回调
-     */
     public interface ScanCallback {
         void onDeviceFound(BluetoothDevice device, int rssi);
         void onScanComplete();
     }
 
-    /**
-     * 连接回调
-     */
+    /** onConnected 在「通知已开启」之后才会回调，此时可以直接发命令 */
     public interface ConnectionCallback {
         void onConnected();
         void onDisconnected();
         void onConnectionFailed(String error);
     }
 
-    /**
-     * 带详细信息的连接回调
-     */
-    public interface ConnectionCallbackWithInfo extends ConnectionCallback {
-        void onServicesDiscovered(String info);
-    }
-
-    /**
-     * 数据回调
-     */
-    public interface DataCallback {
-        void onDataReceived(byte[] data);
-        void onDataSent(boolean success);
+    /** 所有通知都走这一个监听，由上层按 CMD 分发 */
+    public interface DataListener {
+        void onNotify(byte[] encrypted16);
+        void onWriteResult(boolean success);
     }
 
     public BluetoothConnectionManager(Context context) {
         this.context = context.getApplicationContext();
-        BluetoothManager bluetoothManager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
-        this.bluetoothAdapter = bluetoothManager.getAdapter();
+        BluetoothManager bm = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+        this.bluetoothAdapter = bm != null ? bm.getAdapter() : null;
     }
 
     public boolean isBluetoothEnabled() {
@@ -108,478 +81,182 @@ public class BluetoothConnectionManager {
     @SuppressLint("MissingPermission")
     public void enableBluetooth(android.app.Activity activity) {
         if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
-            android.content.Intent enableBtIntent = new android.content.Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
-            activity.startActivityForResult(enableBtIntent, 1);
+            activity.startActivityForResult(new android.content.Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE), 1);
         }
     }
 
-    /**
-     * 开始扫描蓝牙设备
-     */
+    public void setDataListener(DataListener listener) {
+        this.dataListener = listener;
+    }
+
+    /** 已连接锁的 MAC（"AA:BB:CC:DD:EE:FF"），用来算 key1 */
+    public String getConnectedAddress() {
+        return connectedAddress;
+    }
+
+    // ---------------- 扫描 ----------------
+
     @SuppressLint("MissingPermission")
     public void startScan(ScanCallback callback) {
-        Log.d(TAG, "开始扫描蓝牙设备");
-
-        if (bluetoothAdapter == null) {
-            Log.e(TAG, "蓝牙适配器为空");
-            if (callback != null) {
-                callback.onScanComplete();
-            }
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
+            if (callback != null) callback.onScanComplete();
             return;
         }
-
-        if (!bluetoothAdapter.isEnabled()) {
-            Log.e(TAG, "蓝牙未开启");
-            if (callback != null) {
-                callback.onScanComplete();
-            }
-            return;
-        }
-
         this.scanCallback = callback;
         isScanning = true;
-
-        // 扫描超时
-        scanTimeoutHandler.postDelayed(() -> {
-            if (isScanning) {
-                Log.d(TAG, "扫描超时，停止扫描");
-                stopScan();
-            }
-        }, SCAN_TIMEOUT_MS);
-
-        // 使用旧API扫描（兼容性最好）
-        startScanLegacy();
+        scanTimeoutHandler.postDelayed(() -> { if (isScanning) stopScan(); }, SCAN_TIMEOUT_MS);
+        bluetoothAdapter.startLeScan(leScanCallback);
     }
 
-    /**
-     * Android 5.0+ 扫描
-     */
-    @SuppressLint("MissingPermission")
-    @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
-    private void startScanLollipop() {
-        android.bluetooth.le.BluetoothLeScanner scanner = bluetoothAdapter.getBluetoothLeScanner();
-        if (scanner != null) {
-            android.bluetooth.le.ScanSettings settings = new android.bluetooth.le.ScanSettings.Builder()
-                    .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
-                    .build();
-            
-            // No filter - check name prefix in callback instead
-            List<android.bluetooth.le.ScanFilter> filters = new ArrayList<>();
-
-            scanner.startScan(filters, settings, new android.bluetooth.le.ScanCallback() {
-                @Override
-                public void onScanResult(int callbackType, android.bluetooth.le.ScanResult result) {
-                    BluetoothDevice device = result.getDevice();
-                    String name = device.getName();
-                    
-                    Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
-                    
-                    // 只处理名称以LOCK_开头的设备
-                    if (name != null && name.startsWith("LOCK_")) {
-                        if (scanCallback != null) {
-                            scanCallback.onDeviceFound(device, result.getRssi());
-                        }
-                    }
-                }
-
-                @Override
-                public void onBatchScanResults(List<android.bluetooth.le.ScanResult> results) {
-                    Log.d(TAG, "批量扫描结果: " + results.size() + "个设备");
-                }
-
-                @Override
-                public void onScanFailed(int errorCode) {
-                    Log.e(TAG, "扫描失败: " + errorCode);
-                    if (scanCallback != null) {
-                        scanCallback.onScanComplete();
-                    }
-                }
-            });
-        } else {
-            Log.e(TAG, "扫描器为空");
-            if (scanCallback != null) {
-                scanCallback.onScanComplete();
-            }
+    private final BluetoothAdapter.LeScanCallback leScanCallback = (device, rssi, scanRecord) -> {
+        String name = device.getName();
+        if (name != null && name.startsWith("LOCK_") && scanCallback != null) {
+            scanCallback.onDeviceFound(device, rssi);
         }
-    }
+    };
 
-    /**
-     * Android 4.3-4.4 扫描（旧API）
-     */
-    @SuppressLint("MissingPermission")
-    private void startScanLegacy() {
-        bluetoothAdapter.startLeScan(new BluetoothAdapter.LeScanCallback() {
-            @Override
-            public void onLeScan(BluetoothDevice device, int rssi, byte[] scanRecord) {
-                String name = device.getName();
-                
-                Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
-                
-                // 只处理名称以LOCK_开头的设备
-                if (name != null && name.startsWith("LOCK_")) {
-                    if (scanCallback != null) {
-                        scanCallback.onDeviceFound(device, rssi);
-                    }
-                }
-            }
-        });
-    }
-
-    /**
-     * 停止扫描
-     */
     @SuppressLint("MissingPermission")
     public void stopScan() {
-        if (!isScanning) {
-            return;
-        }
-
+        if (!isScanning) return;
         isScanning = false;
         scanTimeoutHandler.removeCallbacksAndMessages(null);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && bluetoothAdapter != null) {
-            android.bluetooth.le.BluetoothLeScanner scanner = bluetoothAdapter.getBluetoothLeScanner();
-            if (scanner != null) {
-                scanner.stopScan(new android.bluetooth.le.ScanCallback() {});
-            }
-        } else if (bluetoothAdapter != null) {
-            bluetoothAdapter.stopLeScan(null);
-        }
-
-        Log.d(TAG, "扫描已停止");
-        
-        ScanCallback callback = scanCallback;
+        if (bluetoothAdapter != null) bluetoothAdapter.stopLeScan(leScanCallback);
+        ScanCallback cb = scanCallback;
         scanCallback = null;
-        if (callback != null) {
-            callback.onScanComplete();
-        }
+        if (cb != null) cb.onScanComplete();
     }
 
-    /**
-     * 连接设备
-     */
-    @SuppressLint("MissingPermission")
-    public void connect(BluetoothDevice device, final ConnectionCallbackWithInfo callback) {
-        Log.d(TAG, "连接设备: " + device.getName() + " (" + device.getAddress() + ")");
+    // ---------------- 连接 ----------------
 
+    @SuppressLint("MissingPermission")
+    public void connect(BluetoothDevice device, ConnectionCallback callback) {
         if (device == null) {
-            Log.e(TAG, "设备为空");
-            if (callback != null) {
-                callback.onConnectionFailed("设备为空");
-            }
+            if (callback != null) callback.onConnectionFailed("设备为空");
             return;
         }
-
-        // 断开现有连接
-        if (bluetoothGatt != null) {
-            bluetoothGatt.disconnect();
-            bluetoothGatt.close();
-            bluetoothGatt = null;
-        }
-
+        closeGatt();
         this.connectionCallback = callback;
+        this.connectedAddress = device.getAddress();
         isConnecting = true;
 
-        // 连接超时
         connectionTimeoutHandler.postDelayed(() -> {
-            if (isConnecting && bluetoothGatt != null) {
-                Log.e(TAG, "连接超时，断开连接");
+            if (isConnecting) {
+                Log.e(TAG, "连接超时");
                 isConnecting = false;
-                bluetoothGatt.disconnect();
-                bluetoothGatt.close();
-                bluetoothGatt = null;
-                
-                if (connectionCallback != null) {
-                    connectionCallback.onConnectionFailed("连接超时");
-                }
+                closeGatt();
+                if (connectionCallback != null) connectionCallback.onConnectionFailed("连接超时");
             }
         }, CONNECTION_TIMEOUT_MS);
 
-        // 连接设备（autoConnect=false，确保立即连接）
         bluetoothGatt = device.connectGatt(context, false, gattCallback);
-        Log.d(TAG, "已发起连接请求");
+        Log.d(TAG, "已发起连接: " + device.getAddress());
     }
 
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
+        @SuppressLint("MissingPermission")
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
-            Log.d(TAG, "连接状态变化 - status: " + status + ", newState: " + newState);
-            
+            Log.d(TAG, "连接状态变化 status=" + status + " newState=" + newState);
             if (newState == BluetoothGatt.STATE_CONNECTED) {
-                Log.d(TAG, "已连接到设备: " + gatt.getDevice().getName());
-                isConnecting = false;
-                connectionTimeoutHandler.removeCallbacksAndMessages(null);
-                
-                // 发现服务
                 gatt.discoverServices();
             } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
-                Log.d(TAG, "与设备断开连接: " + gatt.getDevice().getName());
-                
-                // 清理连接超时
-                connectionTimeoutHandler.removeCallbacksAndMessages(null);
-                dataTimeoutHandler.removeCallbacksAndMessages(null);
+                boolean wasConnecting = isConnecting;
                 isConnecting = false;
-
+                connectionTimeoutHandler.removeCallbacksAndMessages(null);
                 if (connectionCallback != null) {
-                    connectionCallback.onDisconnected();
+                    if (wasConnecting) connectionCallback.onConnectionFailed("连接断开 status=" + status);
+                    else connectionCallback.onDisconnected();
                 }
-            } else {
-                Log.d(TAG, "未知连接状态: " + newState);
             }
         }
 
         @Override
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
-            Log.d(TAG, "服务发现 - status: " + status);
-            
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                fail("服务发现失败: " + status);
+                return;
+            }
+            BluetoothGattService service = gatt.getService(BleLockSdk.SERVICE_UUID);
+            if (service == null) { fail("未找到锁服务 6E40000A（不是我们的锁，或固件不对）"); return; }
+            notifyCharacteristic = service.getCharacteristic(BleLockSdk.NOTIFY_UUID);
+            writeCharacteristic = service.getCharacteristic(BleLockSdk.WRITE_UUID);
+            if (notifyCharacteristic == null || writeCharacteristic == null) { fail("特征缺失"); return; }
+            if (!enableNotification(gatt, notifyCharacteristic)) fail("开启通知失败");
+        }
+
+        @Override
+        public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
+            if (!descriptor.getUuid().equals(CCC_DESCRIPTOR_UUID)) return;
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d(TAG, "服务发现成功");
-                
-                // 设置Nordic UART服务
-                boolean setupResult = setupNordicUartService(gatt);
-                
-                if (setupResult) {
-                    Log.d(TAG, "Nordic UART服务设置成功");
-                    
-                    if (connectionCallback != null && connectionCallback instanceof ConnectionCallbackWithInfo) {
-                        ((ConnectionCallbackWithInfo) connectionCallback).onServicesDiscovered(
-                            "Nordic UART服务已就绪");
-                    }
-                    
-                    if (connectionCallback != null) {
-                        connectionCallback.onConnected();
-                    }
-                } else {
-                    Log.e(TAG, "Nordic UART服务设置失败");
-                    
-                    if (connectionCallback != null) {
-                        connectionCallback.onConnectionFailed("Nordic UART服务设置失败");
-                    }
-                }
+                Log.d(TAG, "通知已开启");
+                isConnecting = false;
+                connectionTimeoutHandler.removeCallbacksAndMessages(null);
+                if (connectionCallback != null) connectionCallback.onConnected();
             } else {
-                Log.e(TAG, "服务发现失败，状态码: " + status);
-                
-                if (connectionCallback != null) {
-                    connectionCallback.onConnectionFailed("服务发现失败: " + status);
-                }
+                fail("CCC 写入失败: " + status);
             }
         }
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
             byte[] data = characteristic.getValue();
-            Log.d(TAG, "收到数据 (通知): " + HexStringUtils.bytesToHexString(data));
-            
-            if (currentDataCallback != null) {
-                currentDataCallback.onDataReceived(data);
-            }
-        }
-
-        @Override
-        public void onCharacteristicRead(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-            Log.d(TAG, "特征读取 - status: " + status);
-            
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                byte[] data = characteristic.getValue();
-                Log.d(TAG, "读取数据: " + HexStringUtils.bytesToHexString(data));
-                
-                if (currentDataCallback != null) {
-                    currentDataCallback.onDataReceived(data);
-                }
-            }
+            Log.d(TAG, "通知: " + HexStringUtils.bytesToHexString(data));
+            if (dataListener != null && data != null) dataListener.onNotify(data);
         }
 
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-            Log.d(TAG, "特征写入 - status: " + status);
-            
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                if (currentDataCallback != null) {
-                    currentDataCallback.onDataSent(true);
-                }
-            } else {
-                Log.e(TAG, "特征写入失败: " + status);
-                
-                if (currentDataCallback != null) {
-                    currentDataCallback.onDataSent(false);
-                }
-            }
+            if (dataListener != null) dataListener.onWriteResult(status == BluetoothGatt.GATT_SUCCESS);
         }
 
-        @Override
-        public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
-            Log.d(TAG, "描述符写入 - status: " + status + ", UUID: " + descriptor.getUuid());
-            
-            if (status == BluetoothGatt.GATT_SUCCESS && descriptor.getUuid().equals(CCC_DESCRIPTOR_UUID)) {
-                // CCC 描述符写入成功
-                Log.d(TAG, "通知/指示已启用");
-            }
+        private void fail(String msg) {
+            Log.e(TAG, msg);
+            isConnecting = false;
+            connectionTimeoutHandler.removeCallbacksAndMessages(null);
+            closeGatt();
+            if (connectionCallback != null) connectionCallback.onConnectionFailed(msg);
         }
     };
 
-    /**
-     * 设置Nordic UART服务
-     */
     @SuppressLint("MissingPermission")
-    private boolean setupNordicUartService(BluetoothGatt gatt) {
-        Log.d(TAG, "设置 Nordic UART 服务");
-        
-        // 查找Nordic UART服务
-        BluetoothGattService service = gatt.getService(NORDIC_UART_SERVICE_UUID);
-        
-        if (service == null) {
-            Log.e(TAG, "Nordic UART 服务未找到");
-            Log.e(TAG, "期望的服务UUID: " + NORDIC_UART_SERVICE_UUID);
-            return false;
-        }
-        
-        Log.d(TAG, "找到 Nordic UART 服务");
-
-        // 查找TX特征（设备→手机）
-        txCharacteristic = service.getCharacteristic(TX_CHARACTERISTIC_UUID);
-        if (txCharacteristic == null) {
-            Log.e(TAG, "TX特征未找到");
-            Log.e(TAG, "期望的TX UUID: " + TX_CHARACTERISTIC_UUID);
-            return false;
-        }
-        
-        Log.d(TAG, "找到 TX 特征: " + TX_CHARACTERISTIC_UUID);
-
-        // 查找RX特征（手机→设备）
-        rxCharacteristic = service.getCharacteristic(RX_CHARACTERISTIC_UUID);
-        if (rxCharacteristic == null) {
-            Log.e(TAG, "RX特征未找到");
-            Log.e(TAG, "期望的RX UUID: " + RX_CHARACTERISTIC_UUID);
-            return false;
-        }
-        
-        Log.d(TAG, "找到 RX 特征: " + RX_CHARACTERISTIC_UUID);
-
-        // 启用TX特征的通知
-        return enableNotification(gatt, txCharacteristic);
+    private boolean enableNotification(BluetoothGatt gatt, BluetoothGattCharacteristic ch) {
+        if (!gatt.setCharacteristicNotification(ch, true)) return false;
+        BluetoothGattDescriptor d = ch.getDescriptor(CCC_DESCRIPTOR_UUID);
+        if (d == null) return false;
+        d.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+        return gatt.writeDescriptor(d);
     }
 
-    /**
-     * 启用通知
-     */
+    // ---------------- 收发 ----------------
+
+    /** 写 16 字节密文到锁 */
     @SuppressLint("MissingPermission")
-    private boolean enableNotification(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
-        Log.d(TAG, "启用通知");
-        
-        if (!gatt.setCharacteristicNotification(characteristic, true)) {
-            Log.e(TAG, "setCharacteristicNotification 失败");
-            return false;
-        }
-        
-        // 获取CCC描述符
-        BluetoothGattDescriptor descriptor = characteristic.getDescriptor(CCC_DESCRIPTOR_UUID);
-        if (descriptor == null) {
-            Log.e(TAG, "CCC描述符未找到");
-            return false;
-        }
-        
-        Log.d(TAG, "找到 CCC 描述符");
-
-        // 启用通知
-        byte[] value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE;
-        
-        // 检查特征属性
-        int properties = characteristic.getProperties();
-        if ((properties & BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) {
-            value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE;
-            Log.d(TAG, "使用 INDICATION 模式");
-        } else if ((properties & BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0) {
-            value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE;
-            Log.d(TAG, "使用 NOTIFICATION 模式");
-        } else {
-            Log.e(TAG, "特征不支持通知或指示");
-            return false;
-        }
-
-        descriptor.setValue(value);
-        
-        boolean result;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+ 使用新API
-            result = gatt.writeDescriptor(descriptor);
-        } else {
-            // Android 12及以下使用旧API
-            result = gatt.writeDescriptor(descriptor);
-        }
-        
-        if (!result) {
-            Log.e(TAG, "writeDescriptor 失败");
-            return false;
-        }
-        
-        Log.d(TAG, "writeDescriptor 成功");
-        return true;
+    public boolean write(byte[] encrypted16) {
+        if (bluetoothGatt == null || writeCharacteristic == null) return false;
+        writeCharacteristic.setValue(encrypted16);
+        writeCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+        boolean ok = bluetoothGatt.writeCharacteristic(writeCharacteristic);
+        Log.d(TAG, "写入 " + HexStringUtils.bytesToHexString(encrypted16) + " -> " + ok);
+        return ok;
     }
 
-    /**
-     * 发送数据
-     */
     @SuppressLint("MissingPermission")
-    public boolean sendData(byte[] data, final DataCallback callback) {
-        Log.d(TAG, "发送数据: " + HexStringUtils.bytesToHexString(data));
-        
-        if (bluetoothGatt == null) {
-            Log.e(TAG, "未连接到设备");
-            return false;
-        }
-
-        if (rxCharacteristic == null) {
-            Log.e(TAG, "RX特征未找到");
-            return false;
-        }
-
-        currentDataCallback = callback;
-        
-        // 写入数据到RX特征
-        rxCharacteristic.setValue(data);
-        
-        // 设置写入类型
-        int writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
-        if ((rxCharacteristic.getProperties() & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
-            writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE;
-            Log.d(TAG, "使用 WRITE_NO_RESPONSE");
-        }
-        rxCharacteristic.setWriteType(writeType);
-        
-        boolean result = bluetoothGatt.writeCharacteristic(rxCharacteristic);
-        
-        if (result) {
-            Log.d(TAG, "数据已提交写入");
-        } else {
-            Log.e(TAG, "数据写入失败");
-        }
-        
-        return result;
-    }
-
-    /**
-     * 断开连接
-     */
     public void disconnect() {
-        Log.d(TAG, "断开连接");
-        
-        // 清理超时
         scanTimeoutHandler.removeCallbacksAndMessages(null);
         connectionTimeoutHandler.removeCallbacksAndMessages(null);
-        dataTimeoutHandler.removeCallbacksAndMessages(null);
-        
         isConnecting = false;
         isScanning = false;
+        closeGatt();
+        connectionCallback = null;
+    }
 
+    @SuppressLint("MissingPermission")
+    private void closeGatt() {
         if (bluetoothGatt != null) {
-            bluetoothGatt.disconnect();
-            bluetoothGatt.close();
+            try { bluetoothGatt.disconnect(); bluetoothGatt.close(); } catch (Exception ignored) {}
             bluetoothGatt = null;
         }
-        
-        rxCharacteristic = null;
-        txCharacteristic = null;
-        connectionCallback = null;
-        currentDataCallback = null;
+        writeCharacteristic = null;
+        notifyCharacteristic = null;
     }
 }
