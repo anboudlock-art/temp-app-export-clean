@@ -1,0 +1,82 @@
+apply plugin: 'com.android.application'
+
+android {
+    compileSdkVersion rootProject.ext.android.compileSdkVersion
+//    buildToolsVersion rootProject.ext.android.buildToolsVersion
+    //android 6.0(api 23) SDK，不再提供org.apache.http.*(只保留几个类)，使用此支持
+    useLibrary 'org.apache.http.legacy'
+
+    defaultConfig {
+        applicationId "com.neutral.blelock"
+        minSdkVersion 19
+        targetSdkVersion 25
+        minSdkVersion rootProject.ext.android.minSdkVersion
+        targetSdkVersion rootProject.ext.android.targetSdkVersion
+        versionCode 2
+        versionName "1.0.1"
+        signingConfig signingConfigs.debug
+        multiDexEnabled = true  //超过64K方法限制
+
+        //ndk打包cpu方案
+        ndk {
+            abiFilters "armeabi"
+        }
+
+//        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        debug {
+            storeFile file('keystore/debug.jks')
+        }
+        release {
+            storeFile file("../../blelock.jks")
+            storePassword "Yojutec2016"
+            keyAlias "yoju-blelock-jks"
+            keyPassword "Yojutec2016"
+        }
+    }
+
+    buildTypes {
+        debug {
+            buildConfigField "boolean", "LOG_DEBUG", "true"
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+        release {
+            buildConfigField "boolean", "LOG_DEBUG", "false"
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    lintOptions {
+        abortOnError false
+    }
+    dexOptions {
+        javaMaxHeapSize "4g"
+    }
+
+    //指定资源目录
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['../jniLibs'];
+        }
+    }
+
+}
+
+dependencies {
+    compile project(':base-blelock')
+
+    //noinspection AndroidLintGradleCompatible
+    compile 'com.android.support:multidex:1.0.1'
+
+    //百度定位
+    compile files('../libs/locSDK_6.23.jar')
+
+    //google pay服务，地图
+    //用play-services-maps，如果用play-services，会超过64K方法
+    compile 'com.google.android.gms:play-services-location:10.2.6'  //google定位
+    compile 'com.google.android.gms:play-services-maps:10.2.6'  //google地图
+}

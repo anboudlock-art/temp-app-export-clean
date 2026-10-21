@@ -1,0 +1,14 @@
+ext {
+    android = [
+            compileSdkVersion       : 25,
+            buildToolsVersion       : "25.0.2",
+            minSdkVersion           : 18,
+            targetSdkVersion        : 25,
+    ]
+
+    dependencies = [
+            appcompatv7    : 'com.android.support:appcompat-v7:25.3.1',
+            recyclerviewv7 : 'com.android.support:recyclerview-v7:25.3.1',
+            supportdesign  : 'com.android.support:design:25.3.1',
+    ]
+}

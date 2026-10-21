@@ -1,0 +1,74 @@
+apply plugin: 'com.android.application'
+
+repositories {
+    mavenCentral()
+    flatDir {
+        dirs '../libs'
+    }
+}
+
+android {
+    compileSdkVersion rootProject.ext.android.compileSdkVersion
+//    buildToolsVersion rootProject.ext.android.buildToolsVersion
+    //android 6.0(api 23) SDK，不再提供org.apache.http.*(只保留几个类)，使用此支持
+    useLibrary 'org.apache.http.legacy'
+    defaultConfig {
+        applicationId "com.chltec.blelock"
+        minSdkVersion rootProject.ext.android.minSdkVersion
+        targetSdkVersion rootProject.ext.android.targetSdkVersion
+        signingConfig signingConfigs.debug
+
+        //ndk打包cpu方案
+        ndk {
+            abiFilters "armeabi"
+        }
+    }
+    signingConfigs {
+        debug {
+            storeFile file('keystore/debug.jks')
+        }
+        release {
+            storeFile file("../../blelock.jks")
+            storePassword "Yojutec2016"
+            keyAlias "yoju-blelock-jks"
+            keyPassword "Yojutec2016"
+        }
+    }
+    buildTypes {
+        debug {
+            buildConfigField "boolean", "LOG_DEBUG", "true"
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+        release {
+            buildConfigField "boolean", "LOG_DEBUG", "false"
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    lintOptions {
+        abortOnError false
+    }
+    dexOptions {
+        javaMaxHeapSize "4g"
+    }
+
+    //指定资源目录
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['../jniLibs'];
+        }
+    }
+
+}
+
+dependencies {
+
+    //百度地图
+    compile files('../libs/baidumapapi_v3_5_0.jar')
+    compile files('../libs/locSDK_6.23.jar')
+
+    compile project(':base-blelock')
+    compile 'com.android.support.constraint:constraint-layout:1.0.1'
+}
