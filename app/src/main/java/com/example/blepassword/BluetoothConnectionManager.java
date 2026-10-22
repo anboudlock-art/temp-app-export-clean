@@ -175,7 +175,7 @@ public class BluetoothConnectionManager {
                     Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
                     
                     // 只处理名称以LOCK_开头的设备
-                    if (name != null && name.startsWith("LOCK_")) {
+                    if (name != null) {
                         if (scanCallback != null) {
                             scanCallback.onDeviceFound(device, result.getRssi());
                         }
@@ -216,7 +216,7 @@ public class BluetoothConnectionManager {
                 Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
                 
                 // 只处理名称以LOCK_开头的设备
-                if (name != null && name.startsWith("LOCK_")) {
+                if (name != null) {
                     if (scanCallback != null) {
                         scanCallback.onDeviceFound(device, rssi);
                     }

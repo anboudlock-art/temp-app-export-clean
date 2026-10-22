@@ -2,31 +2,48 @@ name: Build APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, claude/kind-ramanujan-qsevok ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-    
+
     - name: Set up JDK
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
-    
+
     - name: Make gradlew executable
       run: chmod +x gradlew
-    
+
     - name: Build with Gradle
       run: ./gradlew assembleDebug --stacktrace
-    
-    - name: Upload APK
+
+    - name: Rename APK
+      run: cp app/build/outputs/apk/debug/app-debug.apk lock-tester.apk
+
+    - name: Upload APK artifact
       uses: actions/upload-artifact@v4
       with:
-        name: app-debug
-        path: app/build/outputs/apk/debug/*.apk
+        name: lock-tester-apk
+        path: lock-tester.apk
+
+    - name: Publish Release
+      if: success()
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release delete lock-tester -y --cleanup-tag || true
+        gh release create lock-tester lock-tester.apk \
+          --target ${{ github.sha }} \
+          -t "锁测试工具 APK" \
+          -n "安装到安卓手机即可逐把测试开关锁：扫描 → 连接 → 自动认证 → 开/关锁。默认连接密码 000000。"
