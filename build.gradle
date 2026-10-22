@@ -1,33 +1,93 @@
-// Top-level build file where you can add configuration options common to all sub-projects/modules.
-apply from: "config.gradle"
+apply plugin: 'com.android.library'
+apply plugin: 'com.jakewharton.butterknife'
+apply plugin: 'bugly'
 
+bugly {
+    appId = '<97b2ff0cac>' // 注册时分配的App ID
+    appKey = '<95000235-4e86-430e-b179-71366d57dda1>' // 注册时分配的App Key
+}
+
+//支持butterknife libraray
+//https://github.com/JakeWharton/butterknife
 buildscript {
     repositories {
         jcenter()
-        mavenCentral()
-        google()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:3.0.0'
-//        classpath 'com.jfrog.bintray.gradle:gradle-bintray-plugin:1.4'
-//        classpath 'com.github.dcendents:android-maven-gradle-plugin:1.3'     // 1.3->1.4.1
-        classpath 'com.tencent.bugly:symtabfileuploader:latest.release' //bugly
-
-        // NOTE: Do not place your application dependencies here; they belong
-        // in the individual module build.gradle files
+        classpath 'com.jakewharton:butterknife-gradle-plugin:8.4.0'
     }
 }
 
-allprojects {
-    repositories {
-        jcenter()
-        mavenCentral()
-        maven { url "https://jitpack.io" }
-        maven { url "https://maven.google.com" }
-        google()
+android {
+    compileSdkVersion rootProject.ext.android.compileSdkVersion
+//    buildToolsVersion rootProject.ext.android.buildToolsVersion
+    //android 6.0(api 23) SDK，不再提供org.apache.http.*(只保留几个类)，使用此支持
+    useLibrary 'org.apache.http.legacy'
+    defaultConfig {
+        minSdkVersion rootProject.ext.android.minSdkVersion
+        targetSdkVersion rootProject.ext.android.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+
+        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+        ndk {
+            // 设置支持的 SO 库构架，一般而言，取你所有的库支持的构架的`交集`。
+            abiFilters 'armeabi'// ' armeabi - v7a ', ' arm64 - v8a ', ' x86 ', ' x86_64 ', ' mips ', ' mips64 '
+        }
+
+    }
+    buildTypes {
+
+        debug {
+            minifyEnabled false
+            buildConfigField "boolean", "LOG_DEBUG", "true"
+        }
+
+        release {
+            minifyEnabled false
+            buildConfigField "boolean", "LOG_DEBUG", "false"
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
     }
 }
 
-task clean(type: Delete) {
-    delete rootProject.buildDir
+dependencies {
+    compile fileTree(dir: 'libs', include: ['*.jar'])
+    androidTestCompile('com.android.support.test.espresso:espresso-core:2.2.2', {
+        exclude group: 'com.android.support', module: 'support-annotations'
+    })
+    testCompile 'junit:junit:4.12'
+
+    compile rootProject.ext.dependencies["appcompatv7"]
+    compile rootProject.ext.dependencies["recyclerviewv7"]
+
+    //波纹背景
+    compile 'com.skyfishjy.ripplebackground:library:1.0.1'
+    //DatePicker
+    compile 'com.github.citux:datetimepicker:0.2.0'
+
+    //数据库greenrobot相关
+    compile 'org.greenrobot:greendao:3.2.0'
+    //友盟统计
+//    compile 'com.umeng.analytics:analytics:latest.integration'
+
+    //Bugly
+    compile 'com.tencent.bugly:crashreport_upgrade:latest.release'
+    compile 'com.tencent.bugly:nativecrashreport:latest.release'
+
+    //蓝牙通信库
+    compile 'com.inuker.bluetooth:library:1.4.0'
+
+    compile 'com.github.zhaokaiqiang.klog:library:1.6.0'
+    compile 'com.dou361.dialogui:jjdxm-dialogui:1.0.3'
+
+    compile 'com.jakewharton:butterknife:8.8.1'
+    annotationProcessor 'com.jakewharton:butterknife-compiler:8.8.1'
+
+    //gif
+    compile 'pl.droidsonroids.gif:android-gif-drawable:1.2.8'
+
+    api 'com.zhouyou:rxeasyhttp:2.0.4'
+
+    compile project(':powerlib')
 }
