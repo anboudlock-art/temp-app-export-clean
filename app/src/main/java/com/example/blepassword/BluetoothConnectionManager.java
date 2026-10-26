@@ -53,6 +53,8 @@ public class BluetoothConnectionManager {
     private ScanCallback scanCallback;
     private ConnectionCallback connectionCallback;
     private DataCallback currentDataCallback;
+    private android.bluetooth.le.ScanCallback modernCb;
+    private BluetoothAdapter.LeScanCallback legacyCb;
 
     private final Handler scanTimeoutHandler = new Handler(Looper.getMainLooper());
     private final Handler connectionTimeoutHandler = new Handler(Looper.getMainLooper());
@@ -67,7 +69,7 @@ public class BluetoothConnectionManager {
      * 扫描回调
      */
     public interface ScanCallback {
-        void onDeviceFound(BluetoothDevice device, int rssi, String name);
+        void onDeviceFound(BluetoothDevice device, int rssi, String name, boolean isLock);
         void onScanComplete();
     }
 
@@ -147,16 +149,24 @@ public class BluetoothConnectionManager {
             }
         }, SCAN_TIMEOUT_MS);
 
-        // 使用旧API扫描（兼容性最好）
-        startScanLegacy();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            startScanModern();
+        } else {
+            startScanLegacy();
+        }
+    }
+
+    /** 名字含 smart 视为我们的锁 */
+    private static boolean nameIsLock(String name) {
+        return name != null && name.toLowerCase(java.util.Locale.US).contains("smart");
     }
 
     /**
-     * Android 5.0+ 扫描
+     * Android 5.0+ 扫描（新版 BLE 扫描接口，拿名字更可靠）
      */
     @SuppressLint("MissingPermission")
     @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
-    private void startScanLollipop() {
+    private void startScanModern() {
         android.bluetooth.le.BluetoothLeScanner scanner = bluetoothAdapter.getBluetoothLeScanner();
         if (scanner != null) {
             android.bluetooth.le.ScanSettings settings = new android.bluetooth.le.ScanSettings.Builder()
@@ -166,7 +176,7 @@ public class BluetoothConnectionManager {
             // No filter - check name prefix in callback instead
             List<android.bluetooth.le.ScanFilter> filters = new ArrayList<>();
 
-            scanner.startScan(filters, settings, new android.bluetooth.le.ScanCallback() {
+            modernCb = new android.bluetooth.le.ScanCallback() {
                 @Override
                 public void onScanResult(int callbackType, android.bluetooth.le.ScanResult result) {
                     BluetoothDevice device = result.getDevice();
@@ -174,12 +184,12 @@ public class BluetoothConnectionManager {
                     
                     Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
                     
-                    // 上报所有设备（名字可能为空，由上层过滤/展示）
+                    // 上报所有设备; 名字含 smart 视为锁, 由上层展示
                     String nm = name;
                     if ((nm == null || nm.isEmpty()) && result.getScanRecord() != null)
                         nm = result.getScanRecord().getDeviceName();
                     if (scanCallback != null) {
-                        scanCallback.onDeviceFound(device, result.getRssi(), nm);
+                        scanCallback.onDeviceFound(device, result.getRssi(), nm, nameIsLock(nm));
                     }
                 }
 
@@ -195,7 +205,8 @@ public class BluetoothConnectionManager {
                         scanCallback.onScanComplete();
                     }
                 }
-            });
+            };
+            scanner.startScan(null, settings, modernCb);
         } else {
             Log.e(TAG, "扫描器为空");
             if (scanCallback != null) {
@@ -209,20 +220,21 @@ public class BluetoothConnectionManager {
      */
     @SuppressLint("MissingPermission")
     private void startScanLegacy() {
-        bluetoothAdapter.startLeScan(new BluetoothAdapter.LeScanCallback() {
+        legacyCb = new BluetoothAdapter.LeScanCallback() {
             @Override
             public void onLeScan(BluetoothDevice device, int rssi, byte[] scanRecord) {
                 String name = device.getName();
                 
                 Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
                 
-                // 上报所有设备（名字可能为空，由上层过滤/展示）
+                // 上报所有设备; 名字含 smart 视为锁
                 String nm = (name == null || name.isEmpty()) ? parseName(scanRecord) : name;
                 if (scanCallback != null) {
-                    scanCallback.onDeviceFound(device, rssi, nm);
+                    scanCallback.onDeviceFound(device, rssi, nm, nameIsLock(nm));
                 }
             }
-        });
+        };
+        bluetoothAdapter.startLeScan(legacyCb);
     }
 
     /**
@@ -237,14 +249,14 @@ public class BluetoothConnectionManager {
         isScanning = false;
         scanTimeoutHandler.removeCallbacksAndMessages(null);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && bluetoothAdapter != null) {
-            android.bluetooth.le.BluetoothLeScanner scanner = bluetoothAdapter.getBluetoothLeScanner();
-            if (scanner != null) {
-                scanner.stopScan(new android.bluetooth.le.ScanCallback() {});
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && bluetoothAdapter != null) {
+                android.bluetooth.le.BluetoothLeScanner scanner = bluetoothAdapter.getBluetoothLeScanner();
+                if (scanner != null && modernCb != null) scanner.stopScan(modernCb);
+            } else if (bluetoothAdapter != null && legacyCb != null) {
+                bluetoothAdapter.stopLeScan(legacyCb);
             }
-        } else if (bluetoothAdapter != null) {
-            bluetoothAdapter.stopLeScan(null);
-        }
+        } catch (Exception e) { Log.e(TAG, "stopScan: " + e); }
 
         Log.d(TAG, "扫描已停止");
         

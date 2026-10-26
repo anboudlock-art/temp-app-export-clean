@@ -112,7 +112,7 @@ public class MainActivity extends AppCompatActivity {
         int hp = dp(16);
         header.setPadding(hp, dp(18), hp, dp(16));
         TextView h1 = new TextView(this);
-        h1.setText("智能锁测试工具");
+        h1.setText("智能锁测试工具  v5");
         h1.setTextSize(22);
         h1.setTypeface(Typeface.DEFAULT_BOLD);
         h1.setTextColor(Color.WHITE);
@@ -338,14 +338,14 @@ public class MainActivity extends AppCompatActivity {
         setStatus("正在扫描…", 0);
         log("开始扫描（约 6 秒）…");
         mgr.startScan(new BluetoothConnectionManager.ScanCallback() {
-            @Override public void onDeviceFound(BluetoothDevice device, int rssi, String name) {
+            @Override public void onDeviceFound(BluetoothDevice device, int rssi, String name, boolean isLock) {
                 String nm = (name == null || name.trim().isEmpty()) ? "(无名)" : name.trim();
                 String mac = device.getAddress();
-                if (!found.containsKey(mac)) log("发现：" + nm + " [" + mac + "] " + rssi + "dBm");
+                if (!found.containsKey(mac)) log("发现：" + nm + " [" + mac + "] " + rssi + "dBm" + (isLock ? "  ★锁" : ""));
                 found.put(mac, device);
                 foundRssi.put(mac, rssi);
                 foundName.put(mac, nm);
-                if (isLockName(nm)) matchMacs.add(mac);        // smart 认作锁
+                if (isLock) matchMacs.add(mac);
             }
             @Override public void onScanComplete() {
                 ui.post(MainActivity.this::afterScan);
