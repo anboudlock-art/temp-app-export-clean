@@ -112,7 +112,7 @@ public class MainActivity extends AppCompatActivity {
         int hp = dp(16);
         header.setPadding(hp, dp(18), hp, dp(16));
         TextView h1 = new TextView(this);
-        h1.setText("智能锁测试工具  v5");
+        h1.setText("智能锁测试工具  v6");
         h1.setTextSize(22);
         h1.setTypeface(Typeface.DEFAULT_BOLD);
         h1.setTextColor(Color.WHITE);
@@ -336,6 +336,8 @@ public class MainActivity extends AppCompatActivity {
         matchMacs.clear();
         setButtonsEnabled(false);
         setStatus("正在扫描…", 0);
+        log("环境：Android " + Build.VERSION.SDK_INT + " · 定位服务 " + (isLocationOn() ? "已开" : "未开")
+                + " · 权限 " + (hasPermissions() ? "OK" : "缺"));
         log("开始扫描（约 6 秒）…");
         mgr.startScan(new BluetoothConnectionManager.ScanCallback() {
             @Override public void onDeviceFound(BluetoothDevice device, int rssi, String name, boolean isLock) {
@@ -356,7 +358,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void afterScan() {
         if (found.isEmpty()) {
-            setStatus("没扫到设备，确认锁上电/靠近后重试", 0);
+            setStatus("没扫到任何设备——请打开手机『定位/位置服务』后重试", 0);
+            log("扫到 0 个设备。安卓扫蓝牙通常要求打开手机『定位服务』(即使系统蓝牙里能看到)。请打开定位后再扫。");
             return;
         }
         final List<BluetoothDevice> devs = new ArrayList<>();
@@ -510,9 +513,20 @@ public class MainActivity extends AppCompatActivity {
     private String[] neededPerms() {
         if (Build.VERSION.SDK_INT >= 31) {
             return new String[]{ Manifest.permission.BLUETOOTH_SCAN,
-                    Manifest.permission.BLUETOOTH_CONNECT };
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.ACCESS_FINE_LOCATION };
         }
         return new String[]{ Manifest.permission.ACCESS_FINE_LOCATION };
+    }
+
+    private boolean isLocationOn() {
+        try {
+            android.location.LocationManager lm =
+                    (android.location.LocationManager) getSystemService(LOCATION_SERVICE);
+            if (Build.VERSION.SDK_INT >= 28) return lm.isLocationEnabled();
+            return lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+                    || lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER);
+        } catch (Exception e) { return true; }
     }
 
     private boolean hasPermissions() {
