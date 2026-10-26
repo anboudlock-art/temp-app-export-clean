@@ -158,7 +158,8 @@ public class BluetoothConnectionManager {
 
     /** 名字含 smart 视为我们的锁 */
     private static boolean nameIsLock(String name) {
-        return name != null && name.toLowerCase(java.util.Locale.US).contains("smart");
+        // 只认完整 "smart lock"，排除 Smart Watch 等
+        return name != null && name.toLowerCase(java.util.Locale.US).contains("smart lock");
     }
 
     /**

@@ -52,7 +52,9 @@ public class MainActivity extends AppCompatActivity {
 
     private boolean authed = false;
     private boolean kaQuiet = false;                 // 保活静默标志（不刷日志）
-    private int testCount = 0;                        // 当前这把锁的开关测试次数
+    private int testCount = 0;                        // 当前这把锁的开锁次数（磁簧断开计）
+    private int lockState = -1;                        // -1 未知 / 0 已锁(锁杆插入) / 1 未锁(锁杆拔出)
+    private static final byte LOCKED_BYTE = 0x01;      // AA 30 xx 中“已锁”对应值；若实测相反改为 0x00
     private String currentMac = "";
     private String countedMac = "";
     private final Map<String, BluetoothDevice> found = new LinkedHashMap<>();
@@ -74,17 +76,17 @@ public class MainActivity extends AppCompatActivity {
     private static final int C_OKTXT   = 0xFF1B7F3B;
     private static final int C_ERRTXT  = 0xFFC62828;
 
-    // 保活：每 3 秒发一次状态查询，防止锁因空闲自动断开
+    // 保活+轮询：每 1.5 秒查一次状态，既防断开，又能及时发现锁杆拔出
     private final Runnable keepAlive = new Runnable() {
         @Override public void run() {
             if (authed && mgr != null) {
                 kaQuiet = true;
                 mgr.sendData(BleLockSdk.status(), dataCb);
-                ui.postDelayed(this, 3000);
+                ui.postDelayed(this, 1500);
             }
         }
     };
-    private void startKeepAlive() { ui.removeCallbacks(keepAlive); ui.postDelayed(keepAlive, 3000); }
+    private void startKeepAlive() { ui.removeCallbacks(keepAlive); ui.postDelayed(keepAlive, 1500); }
     private void stopKeepAlive() { ui.removeCallbacks(keepAlive); kaQuiet = false; }
 
     @Override
@@ -95,7 +97,7 @@ public class MainActivity extends AppCompatActivity {
         setButtonsEnabled(false);
         updateCount();
         log("老锁协议：服务 6E400007 / 写 6E400009 / 通知 6E400008");
-        log("优先显示 smart / SMNT 设备。点“扫描并连接”开始。");
+        log("只显示 smart lock 设备。点“扫描并连接”开始。");
         ensurePermissions();
     }
 
@@ -112,7 +114,7 @@ public class MainActivity extends AppCompatActivity {
         int hp = dp(16);
         header.setPadding(hp, dp(18), hp, dp(16));
         TextView h1 = new TextView(this);
-        h1.setText("智能锁测试工具  v6");
+        h1.setText("智能锁测试工具  v7");
         h1.setTextSize(22);
         h1.setTypeface(Typeface.DEFAULT_BOLD);
         h1.setTextColor(Color.WHITE);
@@ -178,7 +180,7 @@ public class MainActivity extends AppCompatActivity {
 
         // 次数卡
         LinearLayout countCard = card(C_COUNT);
-        TextView cLabel = tag("本把锁已测试");
+        TextView cLabel = tag("本把锁 · 开锁次数（拔出计）");
         cLabel.setTextColor(0xFF0D47A1);
         LinearLayout countRow = new LinearLayout(this);
         countRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -306,9 +308,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void setButtonsEnabled(boolean en) {
         authed = en;
-        setBtn(btnOpen, en);
-        setBtn(btnClose, en);
         setBtn(btnStatus, en);
+        updateOpCloseButtons();
     }
 
     private void setBtn(Button b, boolean en) {
@@ -334,6 +335,7 @@ public class MainActivity extends AppCompatActivity {
         foundRssi.clear();
         foundName.clear();
         matchMacs.clear();
+        lockState = -1;
         setButtonsEnabled(false);
         setStatus("正在扫描…", 0);
         log("环境：Android " + Build.VERSION.SDK_INT + " · 定位服务 " + (isLocationOn() ? "已开" : "未开")
@@ -401,6 +403,7 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onDisconnected() {
                 ui.post(() -> {
                     stopKeepAlive();
+                    lockState = -1;
                     setStatus("已断开（可重新扫描连接）", 0);
                     setButtonsEnabled(false);
                     log("连接断开");
@@ -422,40 +425,63 @@ public class MainActivity extends AppCompatActivity {
 
     private void onResp(byte[] d) {
         if (d == null || d.length == 0) return;
-        // 保活回包：静默更新状态，不刷日志
-        if (kaQuiet && d.length >= 2 && d[0] == BleLockSdk.RESP && d[1] == BleLockSdk.CMD_STATUS) {
-            kaQuiet = false;
-            if (d.length >= 3) setStatus(d[2] == 0x01 ? "已连接 · 已锁 🔒" : "已连接 · 未锁 🔓", 1);
-            return;
-        }
+        boolean isStatus = d.length >= 3 && d[0] == BleLockSdk.RESP && d[1] == BleLockSdk.CMD_STATUS;
+        if (kaQuiet && isStatus) { kaQuiet = false; handleStatus(d[2]); return; }   // 保活回包: 静默驱动状态
         log("收到：" + HexStringUtils.bytesToHexString(d));
         if (d[0] != BleLockSdk.RESP || d.length < 2) return;
         byte cmd = d[1];
         if (cmd == BleLockSdk.CMD_AUTH) {
             if (BleLockSdk.isAuthOk(d)) {
-                setButtonsEnabled(true);
                 if (!currentMac.equals(countedMac)) { testCount = 0; countedMac = currentMac; updateCount(); }
-                setStatus("认证成功 ✓ 可连续开关锁", 1);
-                log("认证成功，已开启保活（每 3 秒），可连续开/关");
+                setButtonsEnabled(true);
+                setStatus("认证成功 ✓ 可开关锁", 1);
+                log("认证成功；按“开锁”后在约2秒内拔出锁杆才算一次（否则会自动回锁）");
                 startKeepAlive();
+                send(BleLockSdk.status(), "查状态");       // 立即取一次状态初始化
             } else {
                 setButtonsEnabled(false);
                 setStatus("认证失败：连接密码不对", 2);
                 log("认证失败（密码错），换个密码再试");
             }
         } else if (cmd == BleLockSdk.CMD_STATUS && d.length >= 3) {
-            setStatus(d[2] == 0x01 ? "已连接 · 已锁 🔒" : "已连接 · 未锁 🔓", 1);
+            handleStatus(d[2]);
         } else if (cmd == BleLockSdk.CMD_ENERGY && d.length >= 3) {
             log("电量：" + (d[2] & 0xFF) + "%");
         }
     }
 
-    /** 开/关锁：发送并计数 */
+    /**
+     * 锁状态（磁簧开关）：锁杆插入=已锁；拔出=开锁。
+     * 每检测到一次 已锁→未锁（锁杆被拔出）记一次开锁；未锁时禁止再开锁。
+     * 本固件：开锁后约 1~2 秒不拔锁杆会自动回锁，不拔则不计数。
+     * 若实测上锁/开锁显示相反，把顶部 LOCKED_BYTE 改成另一个值即可。
+     */
+    private void handleStatus(byte st) {
+        int ns = (st == LOCKED_BYTE) ? 0 : 1;
+        if (lockState == 0 && ns == 1) {               // 锁杆拔出 → 记一次开锁
+            testCount++;
+            updateCount();
+            log("检测到开锁（锁杆拔出）→ 开锁次数 " + testCount);
+        }
+        if (ns != lockState) {
+            log("锁状态：" + (ns == 0 ? "已锁(锁杆插入)" : "未锁(锁杆拔出)")
+                    + "  [AA 30 " + String.format("%02X", st) + "]");
+        }
+        lockState = ns;
+        setStatus(ns == 0 ? "已连接 · 已锁 🔒" : "已连接 · 未锁 🔓（拔出）", 1);
+        updateOpCloseButtons();
+    }
+
+    /** 开锁仅在已锁/未知时可用；未锁时禁止再开锁。关锁认证后可用。 */
+    private void updateOpCloseButtons() {
+        setBtn(btnOpen, authed && lockState != 1);
+        setBtn(btnClose, authed);
+    }
+
+    /** 开/关锁：只发命令。开锁计数由“锁杆拔出(磁簧断开)”驱动，不在此 +1 */
     private void doOp(byte[] cmd, String what) {
         if (!authed) { toast("请先连接并认证"); return; }
         send(cmd, what);
-        testCount++;
-        updateCount();
     }
 
     private void send(byte[] data, String what) {
@@ -468,6 +494,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void onDisconnect() {
         stopKeepAlive();
+        lockState = -1;
         if (mgr != null) mgr.disconnect();
         setButtonsEnabled(false);
         setStatus("已断开", 0);
