@@ -67,7 +67,7 @@ public class BluetoothConnectionManager {
      * 扫描回调
      */
     public interface ScanCallback {
-        void onDeviceFound(BluetoothDevice device, int rssi);
+        void onDeviceFound(BluetoothDevice device, int rssi, String name);
         void onScanComplete();
     }
 
@@ -174,11 +174,12 @@ public class BluetoothConnectionManager {
                     
                     Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
                     
-                    // 只处理名称以LOCK_开头的设备
-                    if (name != null) {
-                        if (scanCallback != null) {
-                            scanCallback.onDeviceFound(device, result.getRssi());
-                        }
+                    // 上报所有设备（名字可能为空，由上层过滤/展示）
+                    String nm = name;
+                    if ((nm == null || nm.isEmpty()) && result.getScanRecord() != null)
+                        nm = result.getScanRecord().getDeviceName();
+                    if (scanCallback != null) {
+                        scanCallback.onDeviceFound(device, result.getRssi(), nm);
                     }
                 }
 
@@ -215,11 +216,10 @@ public class BluetoothConnectionManager {
                 
                 Log.d(TAG, "发现设备: " + name + " (" + device.getAddress() + ")");
                 
-                // 只处理名称以LOCK_开头的设备
-                if (name != null) {
-                    if (scanCallback != null) {
-                        scanCallback.onDeviceFound(device, rssi);
-                    }
+                // 上报所有设备（名字可能为空，由上层过滤/展示）
+                String nm = (name == null || name.isEmpty()) ? parseName(scanRecord) : name;
+                if (scanCallback != null) {
+                    scanCallback.onDeviceFound(device, rssi, nm);
                 }
             }
         });
@@ -555,6 +555,23 @@ public class BluetoothConnectionManager {
         }
         
         return result;
+    }
+
+    /** 从 legacy 广播原始数据解析设备名（AD type 0x08 短名 / 0x09 全名） */
+    private static String parseName(byte[] rec) {
+        if (rec == null) return null;
+        int i = 0;
+        while (i + 1 < rec.length) {
+            int len = rec[i] & 0xFF;
+            if (len == 0) break;
+            int type = rec[i + 1] & 0xFF;
+            if ((type == 0x09 || type == 0x08) && len > 1 && i + 1 + len <= rec.length) {
+                try { return new String(rec, i + 2, len - 1, "UTF-8").trim(); }
+                catch (Exception e) { return null; }
+            }
+            i += len + 1;
+        }
+        return null;
     }
 
     /**

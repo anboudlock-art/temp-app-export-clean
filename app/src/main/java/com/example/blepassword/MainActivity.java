@@ -57,6 +57,7 @@ public class MainActivity extends AppCompatActivity {
     private String countedMac = "";
     private final Map<String, BluetoothDevice> found = new LinkedHashMap<>();
     private final Map<String, Integer> foundRssi = new LinkedHashMap<>();
+    private final Map<String, String> foundName = new LinkedHashMap<>();
     private final java.util.Set<String> matchMacs = new java.util.HashSet<>();
 
     private static final int REQ_PERM = 1001;
@@ -331,18 +332,20 @@ public class MainActivity extends AppCompatActivity {
         stopKeepAlive();
         found.clear();
         foundRssi.clear();
+        foundName.clear();
         matchMacs.clear();
         setButtonsEnabled(false);
         setStatus("正在扫描…", 0);
         log("开始扫描（约 6 秒）…");
         mgr.startScan(new BluetoothConnectionManager.ScanCallback() {
-            @Override public void onDeviceFound(BluetoothDevice device, int rssi) {
-                String name = safeName(device);
+            @Override public void onDeviceFound(BluetoothDevice device, int rssi, String name) {
+                String nm = (name == null || name.trim().isEmpty()) ? "(无名)" : name.trim();
                 String mac = device.getAddress();
-                if (!found.containsKey(mac)) log("发现：" + name + " [" + mac + "] " + rssi + "dBm");
+                if (!found.containsKey(mac)) log("发现：" + nm + " [" + mac + "] " + rssi + "dBm");
                 found.put(mac, device);
                 foundRssi.put(mac, rssi);
-                if (isLockName(name)) matchMacs.add(mac);     // smart / SMNT 认作锁
+                foundName.put(mac, nm);
+                if (isLockName(nm)) matchMacs.add(mac);        // smart 认作锁
             }
             @Override public void onScanComplete() {
                 ui.post(MainActivity.this::afterScan);
@@ -367,7 +370,7 @@ public class MainActivity extends AppCompatActivity {
         final String[] items = new String[devs.size()];
         for (int i = 0; i < devs.size(); i++) {
             BluetoothDevice d = devs.get(i);
-            items[i] = safeName(d) + "   [" + d.getAddress() + "]   "
+            items[i] = foundName.get(d.getAddress()) + "   [" + d.getAddress() + "]   "
                     + foundRssi.get(d.getAddress()) + "dBm";
         }
         if (devs.size() == 1) { connect(devs.get(0)); return; }
@@ -381,9 +384,10 @@ public class MainActivity extends AppCompatActivity {
     // ---------------------------------------------------------------- connect + auth
     private void connect(BluetoothDevice device) {
         currentMac = device.getAddress();
+        String nm = foundName.containsKey(currentMac) ? foundName.get(currentMac) : safeName(device);
         setStatus("连接中…", 0);
-        tvDevice.setText(safeName(device) + "  [" + currentMac + "]");
-        log("连接 " + safeName(device) + " [" + currentMac + "]");
+        tvDevice.setText(nm + "  [" + currentMac + "]");
+        log("连接 " + nm + " [" + currentMac + "]");
         mgr.connect(device, new BluetoothConnectionManager.ConnectionCallbackWithInfo() {
             @Override public void onServicesDiscovered(String info) { ui.post(() -> log(info)); }
             @Override public void onConnected() {
@@ -472,11 +476,9 @@ public class MainActivity extends AppCompatActivity {
         return p.isEmpty() ? "000000" : p;
     }
 
-    /** 锁设备：名称含 smart 或 SMNT（不区分大小写） */
+    /** 锁设备：名称含 smart（不区分大小写，如 "smart lock"） */
     private boolean isLockName(String name) {
-        if (name == null) return false;
-        String u = name.toLowerCase(Locale.US);
-        return u.contains("smart") || u.contains("smnt");
+        return name != null && name.toLowerCase(Locale.US).contains("smart");
     }
 
     private String safeName(BluetoothDevice d) {
