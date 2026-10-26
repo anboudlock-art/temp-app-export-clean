@@ -558,6 +558,20 @@ public class BluetoothConnectionManager {
     }
 
     /**
+     * 请求高连接优先级（更短的连接间隔，连接更稳、响应更快）
+     */
+    @SuppressLint("MissingPermission")
+    public void requestHighPriority() {
+        if (bluetoothGatt != null) {
+            try {
+                bluetoothGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH);
+            } catch (Exception e) {
+                Log.e(TAG, "requestConnectionPriority failed: " + e);
+            }
+        }
+    }
+
+    /**
      * 断开连接
      */
     public void disconnect() {

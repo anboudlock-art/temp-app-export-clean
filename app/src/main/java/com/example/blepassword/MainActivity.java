@@ -5,10 +5,13 @@ import android.app.AlertDialog;
 import android.bluetooth.BluetoothDevice;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.text.method.ScrollingMovementMethod;
 import android.view.Gravity;
 import android.view.View;
@@ -34,8 +37,9 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * 锁测试工具 —— 连接老固件（服务 6E400007，广播名 smart lock），
- * 自动发送连接密码认证，然后一键开/关锁。用于产线逐把测试。
+ * 智能锁测试工具（CC2541 老固件）。
+ * 只显示广播名含 "smart lock" 的设备；连接后自动认证并保活，可连续开/关锁；
+ * 统计当前这把锁的开关测试次数。
  */
 public class MainActivity extends AppCompatActivity {
 
@@ -43,15 +47,43 @@ public class MainActivity extends AppCompatActivity {
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private EditText etPwd;
-    private TextView tvStatus;
-    private TextView tvLog;
+    private TextView tvStatus, tvDevice, tvCount, tvLog;
     private Button btnScan, btnOpen, btnClose, btnStatus, btnDisconnect;
 
     private boolean authed = false;
+    private boolean kaQuiet = false;                 // 保活静默标志（不刷日志）
+    private int testCount = 0;                        // 当前这把锁的开关测试次数
+    private String currentMac = "";
+    private String countedMac = "";
     private final Map<String, BluetoothDevice> found = new LinkedHashMap<>();
     private final Map<String, Integer> foundRssi = new LinkedHashMap<>();
 
     private static final int REQ_PERM = 1001;
+
+    // 配色
+    private static final int C_BG      = 0xFFEEF2F6;
+    private static final int C_HEADER  = 0xFF1565C0;
+    private static final int C_CARD    = 0xFFFFFFFF;
+    private static final int C_COUNT   = 0xFFE3F2FD;
+    private static final int C_BLUE    = 0xFF1565C0;
+    private static final int C_GREEN   = 0xFF2E7D32;
+    private static final int C_ORANGE  = 0xFFE65100;
+    private static final int C_GREY    = 0xFFCFD8DC;
+    private static final int C_OKTXT   = 0xFF1B7F3B;
+    private static final int C_ERRTXT  = 0xFFC62828;
+
+    // 保活：每 3 秒发一次状态查询，防止锁因空闲自动断开
+    private final Runnable keepAlive = new Runnable() {
+        @Override public void run() {
+            if (authed && mgr != null) {
+                kaQuiet = true;
+                mgr.sendData(BleLockSdk.status(), dataCb);
+                ui.postDelayed(this, 3000);
+            }
+        }
+    };
+    private void startKeepAlive() { ui.removeCallbacks(keepAlive); ui.postDelayed(keepAlive, 3000); }
+    private void stopKeepAlive() { ui.removeCallbacks(keepAlive); kaQuiet = false; }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -59,8 +91,9 @@ public class MainActivity extends AppCompatActivity {
         setContentView(buildUi());
         mgr = new BluetoothConnectionManager(this);
         setButtonsEnabled(false);
+        updateCount();
         log("老锁协议：服务 6E400007 / 写 6E400009 / 通知 6E400008");
-        log("默认连接密码 000000。点“扫描并连接”开始。");
+        log("只显示 smart lock 设备。点“扫描并连接”开始。");
         ensurePermissions();
     }
 
@@ -68,93 +101,201 @@ public class MainActivity extends AppCompatActivity {
     private View buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(16);
-        root.setPadding(pad, pad, pad, pad);
+        root.setBackgroundColor(C_BG);
 
-        TextView title = new TextView(this);
-        title.setText("锁测试工具");
-        title.setTextSize(22);
-        title.setTextColor(Color.BLACK);
-        title.setGravity(Gravity.CENTER);
-        root.addView(title);
+        // header
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setBackgroundColor(C_HEADER);
+        int hp = dp(16);
+        header.setPadding(hp, dp(18), hp, dp(16));
+        TextView h1 = new TextView(this);
+        h1.setText("智能锁测试工具");
+        h1.setTextSize(22);
+        h1.setTypeface(Typeface.DEFAULT_BOLD);
+        h1.setTextColor(Color.WHITE);
+        TextView h2 = new TextView(this);
+        h2.setText("逐把测试 · 扫描 → 连接 → 自动认证 → 开 / 关");
+        h2.setTextSize(12);
+        h2.setTextColor(0xCCFFFFFF);
+        header.addView(h1);
+        header.addView(h2);
+        root.addView(header);
 
+        // 可滚动内容
+        ScrollView scroll = new ScrollView(this);
+        scroll.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        int cp = dp(14);
+        content.setPadding(cp, cp, cp, cp);
+        scroll.addView(content, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(scroll);
+
+        // 连接密码 + 扫描按钮
+        LinearLayout connCard = card(C_CARD);
         LinearLayout pwdRow = new LinearLayout(this);
         pwdRow.setOrientation(LinearLayout.HORIZONTAL);
-        pwdRow.setPadding(0, dp(12), 0, dp(4));
+        pwdRow.setGravity(Gravity.CENTER_VERTICAL);
         TextView pwdLabel = new TextView(this);
-        pwdLabel.setText("连接密码：");
-        pwdLabel.setTextSize(16);
-        pwdLabel.setGravity(Gravity.CENTER_VERTICAL);
+        pwdLabel.setText("连接密码 ");
+        pwdLabel.setTextColor(Color.DKGRAY);
         etPwd = new EditText(this);
         etPwd.setText("000000");
         etPwd.setSingleLine(true);
+        etPwd.setInputType(InputType.TYPE_CLASS_NUMBER);
         etPwd.setLayoutParams(new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         pwdRow.addView(pwdLabel);
         pwdRow.addView(etPwd);
-        root.addView(pwdRow);
-
-        btnScan = big("① 扫描并连接锁");
+        connCard.addView(pwdRow);
+        btnScan = mkBtn("① 扫描并连接  (smart lock)", C_BLUE, Color.WHITE, 17);
+        topMargin(btnScan, 10);
         btnScan.setOnClickListener(v -> onScan());
-        root.addView(btnScan);
+        connCard.addView(btnScan);
+        content.addView(connCard);
 
+        // 状态卡
+        LinearLayout statusCard = card(C_CARD);
+        TextView sLabel = tag("状态");
         tvStatus = new TextView(this);
-        tvStatus.setText("状态：未连接");
-        tvStatus.setTextSize(18);
-        tvStatus.setTextColor(Color.parseColor("#B00020"));
-        tvStatus.setPadding(0, dp(10), 0, dp(10));
-        root.addView(tvStatus);
+        tvStatus.setText("未连接");
+        tvStatus.setTextSize(19);
+        tvStatus.setTypeface(Typeface.DEFAULT_BOLD);
+        tvStatus.setTextColor(C_ERRTXT);
+        tvDevice = new TextView(this);
+        tvDevice.setText("");
+        tvDevice.setTextSize(12);
+        tvDevice.setTextColor(Color.GRAY);
+        statusCard.addView(sLabel);
+        statusCard.addView(tvStatus);
+        statusCard.addView(tvDevice);
+        content.addView(statusCard);
 
-        LinearLayout row1 = new LinearLayout(this);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
-        btnOpen = big("② 开锁");
-        btnOpen.setOnClickListener(v -> send(BleLockSdk.open(), "开锁"));
-        btnClose = big("② 关锁");
-        btnClose.setOnClickListener(v -> send(BleLockSdk.close(), "关锁"));
-        row1.addView(wrap(btnOpen));
-        row1.addView(wrap(btnClose));
-        root.addView(row1);
+        // 次数卡
+        LinearLayout countCard = card(C_COUNT);
+        TextView cLabel = tag("本把锁已测试");
+        cLabel.setTextColor(0xFF0D47A1);
+        LinearLayout countRow = new LinearLayout(this);
+        countRow.setOrientation(LinearLayout.HORIZONTAL);
+        countRow.setGravity(Gravity.CENTER_VERTICAL);
+        tvCount = new TextView(this);
+        tvCount.setText("0");
+        tvCount.setTextSize(46);
+        tvCount.setTypeface(Typeface.DEFAULT_BOLD);
+        tvCount.setTextColor(0xFF0D47A1);
+        TextView cUnit = new TextView(this);
+        cUnit.setText("  次");
+        cUnit.setTextSize(18);
+        cUnit.setTextColor(0xFF0D47A1);
+        countRow.addView(tvCount);
+        countRow.addView(cUnit);
+        countCard.addView(cLabel);
+        countCard.addView(countRow);
+        content.addView(countCard);
 
-        LinearLayout row2 = new LinearLayout(this);
-        row2.setOrientation(LinearLayout.HORIZONTAL);
-        btnStatus = big("查状态");
+        // 开 / 关 大按钮
+        LinearLayout opRow = new LinearLayout(this);
+        opRow.setOrientation(LinearLayout.HORIZONTAL);
+        topMargin(opRow, 4);
+        btnOpen = mkBtn("开 锁", C_GREEN, Color.WHITE, 22);
+        btnClose = mkBtn("关 锁", C_ORANGE, Color.WHITE, 22);
+        btnOpen.setMinimumHeight(dp(64));
+        btnClose.setMinimumHeight(dp(64));
+        btnOpen.setOnClickListener(v -> doOp(BleLockSdk.open(), "开锁"));
+        btnClose.setOnClickListener(v -> doOp(BleLockSdk.close(), "关锁"));
+        opRow.addView(weight(btnOpen, 6));
+        opRow.addView(weight(btnClose, 6));
+        content.addView(opRow);
+
+        // 查状态 / 断开
+        LinearLayout subRow = new LinearLayout(this);
+        subRow.setOrientation(LinearLayout.HORIZONTAL);
+        topMargin(subRow, 2);
+        btnStatus = mkBtn("查状态", C_GREY, Color.BLACK, 15);
+        btnDisconnect = mkBtn("断开", C_GREY, Color.BLACK, 15);
         btnStatus.setOnClickListener(v -> send(BleLockSdk.status(), "查状态"));
-        btnDisconnect = big("断开");
         btnDisconnect.setOnClickListener(v -> onDisconnect());
-        row2.addView(wrap(btnStatus));
-        row2.addView(wrap(btnDisconnect));
-        root.addView(row2);
+        subRow.addView(weight(btnStatus, 6));
+        subRow.addView(weight(btnDisconnect, 6));
+        content.addView(subRow);
 
-        TextView logLabel = new TextView(this);
-        logLabel.setText("日志：");
-        logLabel.setPadding(0, dp(10), 0, 0);
+        // 日志（固定在底部，独立滚动）
+        TextView logLabel = tag("日志");
+        logLabel.setPadding(dp(14), dp(6), dp(14), dp(2));
         root.addView(logLabel);
-
-        ScrollView sv = new ScrollView(this);
-        sv.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        ScrollView logScroll = new ScrollView(this);
+        LinearLayout.LayoutParams lsp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(150));
+        lsp.setMargins(dp(14), 0, dp(14), dp(12));
+        logScroll.setLayoutParams(lsp);
+        logScroll.setBackground(rounded(0xFFFAFAFA, 10));
         tvLog = new TextView(this);
-        tvLog.setTextSize(13);
-        tvLog.setTextColor(Color.DKGRAY);
+        tvLog.setPadding(dp(10), dp(8), dp(10), dp(8));
+        tvLog.setTextSize(12);
+        tvLog.setTextColor(0xFF444444);
         tvLog.setMovementMethod(new ScrollingMovementMethod());
-        sv.addView(tvLog);
-        root.addView(sv);
+        logScroll.addView(tvLog);
+        root.addView(logScroll);
 
         return root;
     }
 
-    private Button big(String text) {
+    // ---- UI helpers ----
+    private GradientDrawable rounded(int color, int radDp) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(color);
+        g.setCornerRadius(dp(radDp));
+        return g;
+    }
+
+    private LinearLayout card(int bg) {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setBackground(rounded(bg, 12));
+        int p = dp(14);
+        l.setPadding(p, dp(12), p, dp(12));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(12));
+        l.setLayoutParams(lp);
+        return l;
+    }
+
+    private TextView tag(String s) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(12);
+        t.setTextColor(Color.GRAY);
+        return t;
+    }
+
+    private Button mkBtn(String text, int bg, int fg, float size) {
         Button b = new Button(this);
         b.setText(text);
-        b.setTextSize(18);
+        b.setTextSize(size);
         b.setAllCaps(false);
+        b.setTextColor(fg);
+        b.setBackground(rounded(bg, 10));
+        try { b.setStateListAnimator(null); } catch (Throwable ignore) {}
         return b;
     }
 
-    private View wrap(Button b) {
-        b.setLayoutParams(new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+    private View weight(Button b, int marginDp) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lp.setMargins(dp(marginDp) / 2, dp(6), dp(marginDp) / 2, 0);
+        b.setLayoutParams(lp);
         return b;
+    }
+
+    private void topMargin(View v, int dp) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dp(dp), 0, 0);
+        v.setLayoutParams(lp);
     }
 
     private int dp(int v) {
@@ -163,9 +304,19 @@ public class MainActivity extends AppCompatActivity {
 
     private void setButtonsEnabled(boolean en) {
         authed = en;
-        if (btnOpen != null) btnOpen.setEnabled(en);
-        if (btnClose != null) btnClose.setEnabled(en);
-        if (btnStatus != null) btnStatus.setEnabled(en);
+        setBtn(btnOpen, en);
+        setBtn(btnClose, en);
+        setBtn(btnStatus, en);
+    }
+
+    private void setBtn(Button b, boolean en) {
+        if (b == null) return;
+        b.setEnabled(en);
+        b.setAlpha(en ? 1f : 0.4f);
+    }
+
+    private void updateCount() {
+        if (tvCount != null) tvCount.setText(String.valueOf(testCount));
     }
 
     // ---------------------------------------------------------------- scan
@@ -176,15 +327,17 @@ public class MainActivity extends AppCompatActivity {
             toast("请先打开蓝牙");
             return;
         }
+        stopKeepAlive();
         found.clear();
         foundRssi.clear();
         setButtonsEnabled(false);
-        setStatus("正在扫描…", false);
-        log("开始扫描（约 6 秒）…");
+        setStatus("正在扫描…", 0);
+        log("开始扫描（约 6 秒，只找 smart lock）…");
         mgr.startScan(new BluetoothConnectionManager.ScanCallback() {
             @Override public void onDeviceFound(BluetoothDevice device, int rssi) {
-                String mac = device.getAddress();
                 String name = safeName(device);
+                if (!isSmartLock(name)) return;              // 只要 smart lock
+                String mac = device.getAddress();
                 if (!found.containsKey(mac)) log("发现：" + name + " [" + mac + "] " + rssi + "dBm");
                 found.put(mac, device);
                 foundRssi.put(mac, rssi);
@@ -198,14 +351,14 @@ public class MainActivity extends AppCompatActivity {
 
     private void afterScan() {
         if (found.isEmpty()) {
-            setStatus("没扫到设备，重试或检查锁是否上电", false);
+            setStatus("没扫到 smart lock，确认锁上电/靠近后重试", 0);
             return;
         }
         final List<BluetoothDevice> devs = new ArrayList<>(found.values());
         final String[] items = new String[devs.size()];
         for (int i = 0; i < devs.size(); i++) {
             BluetoothDevice d = devs.get(i);
-            items[i] = safeName(d) + "  [" + d.getAddress() + "]  "
+            items[i] = safeName(d) + "   [" + d.getAddress() + "]   "
                     + foundRssi.get(d.getAddress()) + "dBm";
         }
         if (devs.size() == 1) { connect(devs.get(0)); return; }
@@ -218,23 +371,27 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------------------------------------------------------------- connect + auth
     private void connect(BluetoothDevice device) {
-        setStatus("连接中：" + safeName(device) + " …", false);
-        log("连接 " + safeName(device) + " [" + device.getAddress() + "]");
+        currentMac = device.getAddress();
+        setStatus("连接中…", 0);
+        tvDevice.setText(safeName(device) + "  [" + currentMac + "]");
+        log("连接 " + safeName(device) + " [" + currentMac + "]");
         mgr.connect(device, new BluetoothConnectionManager.ConnectionCallbackWithInfo() {
             @Override public void onServicesDiscovered(String info) { ui.post(() -> log(info)); }
             @Override public void onConnected() {
-                ui.post(() -> {
-                    setStatus("已连接，正在认证…", false);
-                    log("已连接，发送连接密码认证…");
-                });
-                // 等通知通道就绪后再发认证
+                mgr.requestHighPriority();
+                ui.post(() -> { setStatus("已连接，正在认证…", 0); log("已连接，发送连接密码认证…"); });
                 ui.postDelayed(() -> send(BleLockSdk.auth(pwd()), "认证(连接密码 " + pwd() + ")"), 600);
             }
             @Override public void onDisconnected() {
-                ui.post(() -> { setStatus("已断开", false); setButtonsEnabled(false); log("连接断开"); });
+                ui.post(() -> {
+                    stopKeepAlive();
+                    setStatus("已断开（可重新扫描连接）", 0);
+                    setButtonsEnabled(false);
+                    log("连接断开");
+                });
             }
             @Override public void onConnectionFailed(String error) {
-                ui.post(() -> { setStatus("连接失败：" + error, false); log("连接失败：" + error); });
+                ui.post(() -> { setStatus("连接失败：" + error, 0); log("连接失败：" + error); });
             }
         });
     }
@@ -243,53 +400,72 @@ public class MainActivity extends AppCompatActivity {
             new BluetoothConnectionManager.DataCallback() {
         @Override public void onDataReceived(byte[] data) { ui.post(() -> onResp(data)); }
         @Override public void onDataSent(boolean success) {
-            ui.post(() -> log(success ? "  → 已发送" : "  → 发送失败"));
+            ui.post(() -> { if (!kaQuiet) log(success ? "  → 已发送" : "  → 发送失败"); });
         }
     };
 
     private void onResp(byte[] d) {
         if (d == null || d.length == 0) return;
+        // 保活回包：静默更新状态，不刷日志
+        if (kaQuiet && d.length >= 2 && d[0] == BleLockSdk.RESP && d[1] == BleLockSdk.CMD_STATUS) {
+            kaQuiet = false;
+            if (d.length >= 3) setStatus(d[2] == 0x01 ? "已连接 · 已锁 🔒" : "已连接 · 未锁 🔓", 1);
+            return;
+        }
         log("收到：" + HexStringUtils.bytesToHexString(d));
         if (d[0] != BleLockSdk.RESP || d.length < 2) return;
         byte cmd = d[1];
         if (cmd == BleLockSdk.CMD_AUTH) {
             if (BleLockSdk.isAuthOk(d)) {
                 setButtonsEnabled(true);
-                setStatus("认证成功 ✓ 可以开关锁了", true);
-                log("认证成功，可以开/关锁");
+                if (!currentMac.equals(countedMac)) { testCount = 0; countedMac = currentMac; updateCount(); }
+                setStatus("认证成功 ✓ 可连续开关锁", 1);
+                log("认证成功，已开启保活（每 3 秒），可连续开/关");
+                startKeepAlive();
             } else {
                 setButtonsEnabled(false);
-                setStatus("认证失败：连接密码不对", false);
-                log("认证失败（密码错），试试别的密码");
+                setStatus("认证失败：连接密码不对", 2);
+                log("认证失败（密码错），换个密码再试");
             }
         } else if (cmd == BleLockSdk.CMD_STATUS && d.length >= 3) {
-            setStatus(d[2] == 0x01 ? "锁状态：已锁 🔒" : "锁状态：未锁 🔓", true);
+            setStatus(d[2] == 0x01 ? "已连接 · 已锁 🔒" : "已连接 · 未锁 🔓", 1);
         } else if (cmd == BleLockSdk.CMD_ENERGY && d.length >= 3) {
             log("电量：" + (d[2] & 0xFF) + "%");
         }
     }
 
+    /** 开/关锁：发送并计数 */
+    private void doOp(byte[] cmd, String what) {
+        if (!authed) { toast("请先连接并认证"); return; }
+        send(cmd, what);
+        testCount++;
+        updateCount();
+    }
+
     private void send(byte[] data, String what) {
         if (mgr == null) return;
-        if (!authed && !what.startsWith("认证")) {
-            toast("请先连接并认证");
-            return;
-        }
+        if (!authed && !what.startsWith("认证")) { toast("请先连接并认证"); return; }
         log("发送 " + what + "：" + HexStringUtils.bytesToHexString(data));
         boolean ok = mgr.sendData(data, dataCb);
         if (!ok) log("  → 写入失败（未连接？）");
     }
 
     private void onDisconnect() {
+        stopKeepAlive();
         if (mgr != null) mgr.disconnect();
         setButtonsEnabled(false);
-        setStatus("已断开", false);
+        setStatus("已断开", 0);
     }
 
     // ---------------------------------------------------------------- helpers
     private String pwd() {
         String p = etPwd.getText().toString().trim();
         return p.isEmpty() ? "000000" : p;
+    }
+
+    /** 只认 smart lock（不区分大小写） */
+    private boolean isSmartLock(String name) {
+        return name != null && name.toLowerCase(Locale.US).contains("smart lock");
     }
 
     private String safeName(BluetoothDevice d) {
@@ -301,9 +477,10 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void setStatus(String s, boolean ok) {
-        tvStatus.setText("状态：" + s);
-        tvStatus.setTextColor(ok ? Color.parseColor("#1B7F3B") : Color.parseColor("#B00020"));
+    /** kind: 0=普通/红 1=成功/绿 2=错误/红 */
+    private void setStatus(String s, int kind) {
+        tvStatus.setText(s);
+        tvStatus.setTextColor(kind == 1 ? C_OKTXT : C_ERRTXT);
     }
 
     private void log(String s) {
@@ -352,6 +529,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        stopKeepAlive();
         if (mgr != null) mgr.disconnect();
     }
 }
