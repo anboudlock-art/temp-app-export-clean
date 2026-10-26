@@ -57,6 +57,7 @@ public class MainActivity extends AppCompatActivity {
     private String countedMac = "";
     private final Map<String, BluetoothDevice> found = new LinkedHashMap<>();
     private final Map<String, Integer> foundRssi = new LinkedHashMap<>();
+    private final java.util.Set<String> matchMacs = new java.util.HashSet<>();
 
     private static final int REQ_PERM = 1001;
 
@@ -93,7 +94,7 @@ public class MainActivity extends AppCompatActivity {
         setButtonsEnabled(false);
         updateCount();
         log("老锁协议：服务 6E400007 / 写 6E400009 / 通知 6E400008");
-        log("只显示 smart lock 设备。点“扫描并连接”开始。");
+        log("优先显示 smart / SMNT 设备。点“扫描并连接”开始。");
         ensurePermissions();
     }
 
@@ -330,17 +331,18 @@ public class MainActivity extends AppCompatActivity {
         stopKeepAlive();
         found.clear();
         foundRssi.clear();
+        matchMacs.clear();
         setButtonsEnabled(false);
         setStatus("正在扫描…", 0);
-        log("开始扫描（约 6 秒，只找 smart lock）…");
+        log("开始扫描（约 6 秒）…");
         mgr.startScan(new BluetoothConnectionManager.ScanCallback() {
             @Override public void onDeviceFound(BluetoothDevice device, int rssi) {
                 String name = safeName(device);
-                if (!isSmartLock(name)) return;              // 只要 smart lock
                 String mac = device.getAddress();
                 if (!found.containsKey(mac)) log("发现：" + name + " [" + mac + "] " + rssi + "dBm");
                 found.put(mac, device);
                 foundRssi.put(mac, rssi);
+                if (isLockName(name)) matchMacs.add(mac);     // smart / SMNT 认作锁
             }
             @Override public void onScanComplete() {
                 ui.post(MainActivity.this::afterScan);
@@ -351,10 +353,17 @@ public class MainActivity extends AppCompatActivity {
 
     private void afterScan() {
         if (found.isEmpty()) {
-            setStatus("没扫到 smart lock，确认锁上电/靠近后重试", 0);
+            setStatus("没扫到设备，确认锁上电/靠近后重试", 0);
             return;
         }
-        final List<BluetoothDevice> devs = new ArrayList<>(found.values());
+        final List<BluetoothDevice> devs = new ArrayList<>();
+        if (!matchMacs.isEmpty()) {
+            for (Map.Entry<String, BluetoothDevice> e : found.entrySet())
+                if (matchMacs.contains(e.getKey())) devs.add(e.getValue());
+        } else {
+            devs.addAll(found.values());
+            log("未匹配到 smart/SMNT，列出全部 " + found.size() + " 个设备供选择");
+        }
         final String[] items = new String[devs.size()];
         for (int i = 0; i < devs.size(); i++) {
             BluetoothDevice d = devs.get(i);
@@ -463,9 +472,11 @@ public class MainActivity extends AppCompatActivity {
         return p.isEmpty() ? "000000" : p;
     }
 
-    /** 只认 smart lock（不区分大小写） */
-    private boolean isSmartLock(String name) {
-        return name != null && name.toLowerCase(Locale.US).contains("smart lock");
+    /** 锁设备：名称含 smart 或 SMNT（不区分大小写） */
+    private boolean isLockName(String name) {
+        if (name == null) return false;
+        String u = name.toLowerCase(Locale.US);
+        return u.contains("smart") || u.contains("smnt");
     }
 
     private String safeName(BluetoothDevice d) {
