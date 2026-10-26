@@ -54,9 +54,13 @@ public class MainActivity extends AppCompatActivity {
     private boolean kaQuiet = false;                 // 保活静默标志（不刷日志）
     private int testCount = 0;                        // 当前这把锁的开锁次数（磁簧断开计）
     private int lockState = -1;                        // -1 未知 / 0 已锁(锁杆插入) / 1 未锁(锁杆拔出)
-    private static final byte LOCKED_BYTE = 0x01;      // AA 30 xx 中“已锁”对应值；若实测相反改为 0x00
+    private static final byte LOCKED_BYTE = 0x00;      // AA 30 xx 中“已锁(锁杆插入)”对应值（本固件实测为 0x00；若又反了改 0x01）
     private String currentMac = "";
     private String countedMac = "";
+    private BluetoothDevice lastDevice;                // 自动重连用
+    private boolean wantConnected = false;             // true=期望保持连接（断了自动重连）
+    private int reconnectTries = 0;
+    private static final int MAX_RECONNECT = 6;
     private final Map<String, BluetoothDevice> found = new LinkedHashMap<>();
     private final Map<String, Integer> foundRssi = new LinkedHashMap<>();
     private final Map<String, String> foundName = new LinkedHashMap<>();
@@ -114,7 +118,7 @@ public class MainActivity extends AppCompatActivity {
         int hp = dp(16);
         header.setPadding(hp, dp(18), hp, dp(16));
         TextView h1 = new TextView(this);
-        h1.setText("智能锁测试工具  v7");
+        h1.setText("智能锁测试工具  v8");
         h1.setTextSize(22);
         h1.setTypeface(Typeface.DEFAULT_BOLD);
         h1.setTextColor(Color.WHITE);
@@ -308,8 +312,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void setButtonsEnabled(boolean en) {
         authed = en;
+        setBtn(btnOpen, en);       // 开/关锁只要已认证就一直可用（任何锁状态都允许开锁，不灰掉）
+        setBtn(btnClose, en);
         setBtn(btnStatus, en);
-        updateOpCloseButtons();
     }
 
     private void setBtn(Button b, boolean en) {
@@ -336,6 +341,7 @@ public class MainActivity extends AppCompatActivity {
         foundName.clear();
         matchMacs.clear();
         lockState = -1;
+        wantConnected = false;
         setButtonsEnabled(false);
         setStatus("正在扫描…", 0);
         log("环境：Android " + Build.VERSION.SDK_INT + " · 定位服务 " + (isLocationOn() ? "已开" : "未开")
@@ -389,6 +395,8 @@ public class MainActivity extends AppCompatActivity {
     // ---------------------------------------------------------------- connect + auth
     private void connect(BluetoothDevice device) {
         currentMac = device.getAddress();
+        lastDevice = device;
+        wantConnected = true;
         String nm = foundName.containsKey(currentMac) ? foundName.get(currentMac) : safeName(device);
         setStatus("连接中…", 0);
         tvDevice.setText(nm + "  [" + currentMac + "]");
@@ -396,23 +404,31 @@ public class MainActivity extends AppCompatActivity {
         mgr.connect(device, new BluetoothConnectionManager.ConnectionCallbackWithInfo() {
             @Override public void onServicesDiscovered(String info) { ui.post(() -> log(info)); }
             @Override public void onConnected() {
+                reconnectTries = 0;
                 mgr.requestHighPriority();
                 ui.post(() -> { setStatus("已连接，正在认证…", 0); log("已连接，发送连接密码认证…"); });
                 ui.postDelayed(() -> send(BleLockSdk.auth(pwd()), "认证(连接密码 " + pwd() + ")"), 600);
             }
             @Override public void onDisconnected() {
-                ui.post(() -> {
-                    stopKeepAlive();
-                    lockState = -1;
-                    setStatus("已断开（可重新扫描连接）", 0);
-                    setButtonsEnabled(false);
-                    log("连接断开");
-                });
+                ui.post(() -> { stopKeepAlive(); setButtonsEnabled(false); tryReconnect("连接断开"); });
             }
             @Override public void onConnectionFailed(String error) {
-                ui.post(() -> { setStatus("连接失败：" + error, 0); log("连接失败：" + error); });
+                ui.post(() -> tryReconnect("连接失败:" + error));
             }
         });
+    }
+
+    /** 断开/失败后自动重连同一把锁，让连续测试不中断；手动断开或重新扫描则停止。 */
+    private void tryReconnect(String why) {
+        if (wantConnected && lastDevice != null && reconnectTries < MAX_RECONNECT) {
+            reconnectTries++;
+            setStatus("自动重连中…(" + reconnectTries + ")", 0);
+            log(why + "，自动重连 #" + reconnectTries + "…");
+            ui.postDelayed(() -> { if (wantConnected && lastDevice != null) connect(lastDevice); }, 900);
+        } else {
+            setStatus(wantConnected ? "多次重连失败，请重新扫描" : "已断开", 0);
+            log(why);
+        }
     }
 
     private final BluetoothConnectionManager.DataCallback dataCb =
@@ -458,7 +474,7 @@ public class MainActivity extends AppCompatActivity {
      */
     private void handleStatus(byte st) {
         int ns = (st == LOCKED_BYTE) ? 0 : 1;
-        if (lockState == 0 && ns == 1) {               // 锁杆拔出 → 记一次开锁
+        if (lockState == 0 && ns == 1) {               // 锁杆拔出(磁簧断开) → 记一次开锁
             testCount++;
             updateCount();
             log("检测到开锁（锁杆拔出）→ 开锁次数 " + testCount);
@@ -468,14 +484,8 @@ public class MainActivity extends AppCompatActivity {
                     + "  [AA 30 " + String.format("%02X", st) + "]");
         }
         lockState = ns;
+        // 仅用于显示，不影响按钮可用性
         setStatus(ns == 0 ? "已连接 · 已锁 🔒" : "已连接 · 未锁 🔓（拔出）", 1);
-        updateOpCloseButtons();
-    }
-
-    /** 开锁仅在已锁/未知时可用；未锁时禁止再开锁。关锁认证后可用。 */
-    private void updateOpCloseButtons() {
-        setBtn(btnOpen, authed && lockState != 1);
-        setBtn(btnClose, authed);
     }
 
     /** 开/关锁：只发命令。开锁计数由“锁杆拔出(磁簧断开)”驱动，不在此 +1 */
@@ -493,6 +503,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onDisconnect() {
+        wantConnected = false;     // 手动断开：停止自动重连
         stopKeepAlive();
         lockState = -1;
         if (mgr != null) mgr.disconnect();
